@@ -30,15 +30,11 @@ the repository has no Cargo workspace.
 
 On entering a clone or worktree, and after pulling changes, re-read this file,
 [the design self-review](docs/design-review.md), and
-[the repository prose skill](.agents/skills/repo-prose/SKILL.md). Before committing,
-enable the repository's `.githooks/commit-msg` hook by following the
-[hook installation instructions](docs/design-review.md#hook-installation).
-Preserve any existing active hooks when installing.
+[the repository prose skill](.agents/skills/repo-prose/SKILL.md). Before every
+commit, review the staged diff against `docs/design-review.md`.
 
-Before every commit, follow the staged-diff review and acknowledgment instructions
-in `docs/design-review.md`. A rejected acknowledgment requires reading that
-document and reviewing the staged change before retrying; do not treat the
-rejection as a formatting repair.
+Changes land on `main` through pull requests against this repository
+(`etwk/hyperflare-inference`).
 
 ## Required prose review
 
@@ -66,8 +62,7 @@ comments before publishing them, even when no repository files change.
 
 Every delegated task must include the skill's resolved absolute path and require
 the delegate to read and follow it. Pass this requirement to further delegates,
-and review returned prose before incorporating or publishing it. A review
-acknowledgment does not substitute for reading the skill and reviewing the text.
+and review returned prose before incorporating or publishing it.
 
 ## Required PR descriptions
 
@@ -139,19 +134,6 @@ detail. Scale length to the change: a small fix may need only a short paragraph
 and relevant validation. The content and order are mandatory; particular headings
 and a fixed-length template are not.
 
-## Contact on PRs and issues
-
-Every PR and issue description has a Discord line after the technical
-explanation, so project developers can contact the person who opens it directly.
-The line gives that person's Discord username, for example
-`Discord: example_user`. Write the username without a leading `@`; GitHub treats
-`@name` as a mention of the GitHub account with that name. When the person
-provides no Discord username, the line states that explicitly:
-`Discord: no username provided`. Never omit the line. An agent opening a PR or
-issue gives the username of the person it acts for, never its own identity.
-When the agent does not know that username, it asks the person instead of
-guessing.
-
 ## Contribution scope and rejection criteria
 
 Flare prepares and serves supported model recipes on NVIDIA GPUs through
@@ -169,10 +151,11 @@ Hypothetical future consumers, agent-generated suggestions, and lint findings
 alone do not establish a need for a change.
 
 - **Reject unapproved scope expansion.** CPU or non-NVIDIA execution,
-  interchangeable execution backends, training or fine-tuning, multi-model
-  hosting and routing, unrelated service APIs, and general-purpose cluster
-  orchestration require an explicit maintainer decision before implementation.
-  Supported cross-node preparation and serving do not authorize these additions.
+  interchangeable execution backends, training or fine-tuning, unrelated service
+  APIs, and general-purpose cluster orchestration require an explicit maintainer
+  decision before implementation. Supported cross-node preparation and serving
+  do not authorize these additions. Serving LoRA adapters on a loaded core, each
+  under its own served model name, is in scope.
 - **Reject architectural violations.** Production Python callbacks, eager
   serving, runtime compilation or recapture, steady-state GPU allocation,
   model-specific native policy or state-update algorithms, and executable
@@ -202,8 +185,8 @@ An explicit maintainer request covering the work is sufficient authorization
 for changes within these constraints and their necessary supporting steps.
 A feature request, passing tests, or a performance gain does not waive an
 architectural invariant. Resolve conflicts through an explicit maintainer
-decision on the design before implementing a change to that invariant; a commit
-acknowledgment or routine PR approval is not that decision. Apply these criteria
+decision on the design before implementing a change to that invariant; a routine
+PR approval is not that decision. Apply these criteria
 to documentation and test changes that would weaken the rules as well as code.
 
 When reviewing a contribution that violates these criteria, identify the
@@ -370,12 +353,11 @@ architectural boundary before committing the change.
   continuation requirements; testing it with GLM does not justify a GLM-only
   scheduler path. Validate affected cache schemes and request lifecycles, and
   report untested models separately from implementation restrictions.
-- Introducing a captured-graph operation family requires prior explicit approval
-  from project owner Luke Alonso <lalonso@gmail.com>. Shape and capacity variants
-  of an existing family do not constitute a new type when its operation contract
-  stays unchanged. A new operation contract requires approval even if it reuses
-  an existing graph kind or enum value. A design acknowledgment does not grant
-  that approval.
+- A new captured-graph operation contract, including one that reuses an
+  existing graph kind or enum value, is documented in the
+  [prepared model contract](helios/model-contract.md) in the change that
+  introduces it. Shape and capacity variants of an existing family keep its
+  contract.
 - Official model recipes live in
   [`local-inference-lab/hyperflare-recipes`](https://github.com/local-inference-lab/hyperflare-recipes)
   (`hyperflare_recipes/recipes/`), and external recipe repositories can pass
@@ -467,20 +449,6 @@ architectural boundary before committing the change.
 - Tests may read variables that opt into GPU tests and locate their
   checkpoints, such as `FLARE_RUN_CUDA_TESTS`. A test variable must not change
   what the code under test does.
-
-## CUDA kernel and model optimization authorship
-
-Claude Opus 5.5 is not reliable for low-level kernel changes in this project.
-Do not use it to design or implement low-level CUDA kernels or
-changes to existing model fusion and GPU execution optimizations. This includes
-CUDA C++, PTX, CuTe DSL, and Triton kernels, and changes to projection packing,
-fused arithmetic, stream overlap, or scratch aliasing in optimized model paths.
-Do not incorporate its generated changes to these mechanisms through another
-contributor or agent.
-
-General PyTorch modeling, recipe integration, checkpoint loading, frontend
-processing, preparation orchestration, CLI/runtime work, tests, and documentation
-are permitted when they do not design or change the restricted mechanisms above.
 
 ## Validation and performance
 

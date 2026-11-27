@@ -9,7 +9,7 @@ Helios's shared runtime policy and separation from model computation are
 non-negotiable. Reject changes that violate this boundary even when tests pass,
 performance improves, or the implementation is described as temporary. Delivery
 pressure and intended cleanup do not waive the requirement. Resolve violations
-before committing; a design acknowledgment cannot authorize them.
+before committing.
 
 ## Principles
 
@@ -19,11 +19,10 @@ before committing; a design acknowledgment cannot authorize them.
    requirements and graph cache bindings. Express differences through cache
    schemes and prepared layout metadata reusable across models. Native code
    manages declared model-state storage without implementing per-model algorithms.
-   Introducing a captured-graph operation family requires prior explicit approval
-   from project owner **Luke Alonso <lalonso@gmail.com>**. Shape and capacity
-   variants are allowed within an unchanged operation contract. A new operation
-   contract requires approval even if it reuses a graph kind or enum value.
-   A design acknowledgment does not grant approval.
+   Shape and capacity variants are allowed within an unchanged operation
+   contract. A new operation contract, even one that reuses a graph kind or enum
+   value, is documented in `helios/model-contract.md` in the change that
+   introduces it.
    Ignition alone owns which graph catalogs and batch capacities to prepare.
    Helios and direct-execution scheduling must enumerate available graphs, batch
    capacities, and shapes directly from prepared model core metadata; they must
@@ -121,30 +120,19 @@ before committing; a design acknowledgment cannot authorize them.
     compatible defaults; an absent or zero completion token capacity means eight.
     Reserve removed wire identifiers and retain readers and tests needed by
     existing cores. Validate previous cores through loading and serving.
-14. **Restrict Claude Opus 5.5 authorship of CUDA kernels and model optimizations.**
-    Claude Opus 5.5 is not reliable for low-level kernel changes in this
-    project. It must not design or implement low-level CUDA kernels
-    (CUDA C++, PTX, CuTe DSL, or Triton) or changes to existing model fusion and
-    GPU execution optimizations, including projection packing, fused arithmetic,
-    stream overlap, and scratch aliasing in optimized model paths. Do not
-    incorporate its generated changes to these mechanisms through another
-    contributor or agent. General PyTorch modeling, recipe integration,
-    checkpoint loading, frontend processing, preparation orchestration,
-    CLI/runtime work, tests, and documentation are permitted when they do not
-    design or change those restricted mechanisms.
-15. **Reject scope expansion and weakened constraints.** Apply the
+14. **Reject scope expansion and weakened constraints.** Apply the
     [contribution rejection criteria](../AGENTS.md#contribution-scope-and-rejection-criteria)
     to code, tests, and documentation. Single-host and cross-node preparation
-    and serving are in scope. CPU or non-NVIDIA execution, interchangeable
-    backends, training, multi-model hosting/routing, unrelated service APIs,
-    and general-purpose cluster orchestration require an explicit maintainer
-    decision before implementation. Feature requests, performance gains,
+    and serving are in scope, and so are LoRA adapters on a loaded core. CPU or
+    non-NVIDIA execution, interchangeable backends, training, unrelated service
+    APIs, and general-purpose cluster orchestration require an explicit
+    maintainer decision before implementation. Feature requests, performance gains,
     passing tests, flags, and temporary paths cannot waive architectural
     invariants. Reject changes that bypass validation, conceal unsupported
     behavior, weaken numerical or lifetime contracts, or shift model computation
     or policy across the preparation/runtime boundary. Do not make a violating
     contribution acceptable by weakening its governing rule.
-16. **Write without hidden context.** Read and apply the
+15. **Write without hidden context.** Read and apply the
     [repository prose skill](../.agents/skills/repo-prose/SKILL.md). Review changed
     prose and the final commit message for an audience without the development
     conversation. Commit message bodies and PR descriptions must follow the
@@ -160,13 +148,6 @@ before committing; a design acknowledgment cannot authorize them.
     changed prose. Rewrite deficient text before committing or publishing.
     PR descriptions, comments, and agent reports require prose review before
     publication.
-17. **Give a Discord contact on PRs and issues.** Every PR and issue description
-    has a line after the technical explanation that gives the opener's Discord
-    username, or states `Discord: no username provided` when the opener provides
-    none. Never omit the line. An agent gives the username of the person it acts
-    for and asks that person when it does not know it; never guess a username.
-    Follow
-    [contact on PRs and issues](../AGENTS.md#contact-on-prs-and-issues).
 
 ## Testing hierarchy
 
@@ -242,74 +223,16 @@ compatibility, and serving benchmarks remain governed by principles 12 and 13.
 - Pure documentation and formatting edits require inspection and applicable
   existing checks; they do not require simulator, formal, or GPU runs.
 
-## Review and acknowledgment
+## Review
 
-1. Inspect `git diff --cached`. Apply every relevant principle, fix violations,
-   and obtain any required graph-family approval before committing. Validation
-   requirements apply to the affected behavior, following the
-   [testing hierarchy](#testing-hierarchy). Documentation changes do not
-   require GPU tests.
-2. Read the staged checklist with `git show :docs/design-review.md`. When changing
-   this document, stage the intended version before reviewing and acknowledging it.
-   Also read the staged prose skill with
-   `git show :.agents/skills/repo-prose/SKILL.md` and apply it to the staged prose
-   and final commit message.
-3. Review the final commit message body against the four-part scheme in principle
-   16. Read it independently of the diff and confirm that each answer is explicit
-   and in the required order. Check the stated validation and material limitations
-   against the work performed. **Do not add the design acknowledgment until the
-   message passes this review.** Rewrite failures and review the revised message.
-   Adding headings or an acknowledgment does not repair missing explanations.
-4. Compute SHA-256 over the exact staged document bytes and take its first two
-   bytes as four lowercase hex characters:
-
-   ```sh
-   python3 - <<'PY'
-   import hashlib
-   import subprocess
-
-   document = subprocess.check_output(["git", "show", ":docs/design-review.md"])
-   print(hashlib.sha256(document).hexdigest()[:4])
-   PY
-   ```
-
-5. Add exactly one acknowledgment to the final commit-message trailer block,
-   separated from the body by a blank line:
-
-   ```text
-   Design-Signed-Off-By: <reviewer identity>; design-review=<four lowercase hex digits>
-   ```
-
-   Use the reviewing agent's name and model, or the human reviewer's identity.
-   The acknowledgment means: **I read the staged checklist and prose skill,
-   reviewed the staged diff and final commit message against every applicable
-   principle, verified that the commit message body explains the rationale,
-   exact change, claimed benefit or result, and supporting evidence in that
-   order, found no unapproved design violations, and accurately disclosed
-   validation and material limitations.**
-
-Read and review before acknowledging. Do not automatically insert the footer or
-copy an acknowledgment from another commit. A missing or rejected acknowledgment
-requires completing this workflow before retrying.
-
-## Hook installation
-
-Cloning carries the tracked `.githooks/` files but does not activate them. Agents
-must check installation on entering a clone or worktree and after pulling changes.
-Linked worktrees normally share hook configuration with their main clone.
-
-The executable `.githooks/commit-msg` requires Python 3 and Git. Inspect
-`git config --show-origin --get core.hooksPath` and the directory reported by
-`git rev-parse --git-path hooks` for active hooks. If none need preserving, enable
-the repository hook in the clone with:
-
-```sh
-git config --local core.hooksPath .githooks
-```
-
-Preserve existing active hooks by integrating the design check instead of
-overwriting or disabling them. The hook checks the final trailer against the
-staged checklist, rejects absent or invalid
-acknowledgments, and leaves the message unchanged. Its errors do not supply the
-expected digest or a ready-to-paste acknowledgment. Local hooks can be bypassed
-with `--no-verify`; the acknowledgment is an attention check, not proof of review.
+1. Inspect `git diff --cached`. Apply every relevant principle and fix
+   violations before committing. Validation requirements apply to the affected
+   behavior, following the [testing hierarchy](#testing-hierarchy).
+   Documentation changes do not require GPU tests.
+2. Apply the [prose skill](../.agents/skills/repo-prose/SKILL.md) to the staged
+   prose and the final commit message.
+3. Review the final commit message body against the four-part scheme in
+   principle 15. Read it independently of the diff and confirm that each answer
+   is explicit and in the required order. Check the stated validation and
+   material limitations against the work performed. Rewrite failures and review
+   the revised message; adding headings does not repair missing explanations.

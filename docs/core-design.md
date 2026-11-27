@@ -273,11 +273,9 @@ same boundary; violations must be resolved before committing.
   programs. Native specialization is limited to concrete cache storage
   requirements and graph cache bindings. Cache schemes and prepared layout
   metadata express those differences through contracts reusable by every model
-  with the same requirements. Introducing a captured-graph operation family requires
-  prior explicit approval from project owner Luke Alonso <lalonso@gmail.com>.
-  Shape and capacity variants preserve an existing family's operation contract;
-  a new operation contract requires approval even when it reuses an existing
-  graph kind or enum value.
+  with the same requirements. A new captured-graph operation contract is
+  documented in the [prepared model contract](../helios/model-contract.md)
+  together with the change that introduces it.
 - **FlashInfer supplies GPU execution.** Preparation uses FlashInfer and its
   b12x operators directly. Flare has no interchangeable kernel backend.
 - **Graphs define model execution.** Preparation resolves kernel calls,
@@ -344,8 +342,9 @@ Serving includes cancellation, streaming, tool-call presentation, structured
 output, prefix reuse, and speculative decoding on one host or supported
 cross-node tensor-parallel groups. Rank coordination and transport preserve
 the same prepared-graph execution and shared runtime policy boundaries.
-Disaggregated prefill, adapters, pooling models, and device portability are
-outside this design.
+Disaggregated prefill, pooling models, and device portability are outside this
+design. LoRA adapters on a loaded core are in scope; they are designed, not
+implemented.
 
 ## 1. Target and execution contract
 
