@@ -87,8 +87,11 @@ so the sync skips them and the next two installs supply this checkout's. The
 recipes package goes last: it and `ignition` both ship an `ignition` console
 script, the last install wins, and only the recipes' script provides the official
 recipes (`python -m ignition` runs core Ignition without them). A later `uv sync`
-undoes the three installs; repeat them afterwards. In the commands of these
-documents, `.venv` is this environment, so run them from the recipes clone.
+undoes the three installs; repeat them afterwards. The `.venv/bin/ignition` and
+`uv pip install` commands in these documents run in the recipes clone, so a native
+executable beside them is written `../hyperflare-inference/flare-cli/target/release/flare`.
+Tests and tools of this checkout run from its root with
+`../hyperflare-recipes/.venv/bin/python`.
 
 Build the native CLI in this checkout:
 
@@ -309,7 +312,7 @@ For a DeepSeek V4.1 TP4 export:
 
 ```sh
 .venv/bin/ignition export deepseek-v4.1-flash --gpus 0,1,2,3 --reuse-weights
-flare-cli/target/release/flare run CACHE_ENTRY --gpus 0,1,2,3
+../hyperflare-inference/flare-cli/target/release/flare run CACHE_ENTRY --gpus 0,1,2,3
 ```
 
 Replace `CACHE_ENTRY` with the directory printed by this export. The command
@@ -528,7 +531,7 @@ Export a core, then launch the native server:
 ```sh
 .venv/bin/ignition export qwen3.8-flash --gpus 0,1
 .venv/bin/ignition convert CACHE_ENTRY --form packed --output qwen.safetensors
-flare-cli/target/release/flare run qwen.safetensors --gpus 0,1
+../hyperflare-inference/flare-cli/target/release/flare run qwen.safetensors --gpus 0,1
 ```
 
 To test a serving-only Rust change, rebuild Flare and load an existing compatible

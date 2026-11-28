@@ -307,7 +307,7 @@ helper shutdown without Orbit. From matching Flare checkouts and preparation
 environments, run one process per host:
 
 ```sh
-.venv/bin/python -m tests.preparation.validate_checkpoint_fabric \
+../hyperflare-recipes/.venv/bin/python -m tests.preparation.validate_checkpoint_fabric \
   --rank 0 --ranks 4 --ring --rendezvous maxwell:29631 \
   --streams 8 --mib 1024 --token-file ~/.config/flare/agent.token
 ```

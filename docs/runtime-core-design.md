@@ -557,7 +557,7 @@ consulted; they confer no verified identity. The private release command stamps
 a JSON profile array into a separately named executable:
 
 ```sh
-.venv/bin/python -m ignition.release flare-cli/target/release/flare \
+../hyperflare-recipes/.venv/bin/python -m ignition.release flare-cli/target/release/flare \
   --output /path/to/distribution/flare --publishers /private/publishers.json
 ```
 

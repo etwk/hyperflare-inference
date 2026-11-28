@@ -797,7 +797,7 @@ mixed/repeated image batches.
 cargo test --manifest-path helios/Cargo.toml --features images --offline
 cargo run --manifest-path helios/Cargo.toml --features images,test-tools --offline \
   --bin test_images -- "$SNAPSHOT" tests/frontend/qwen38_images.json
-.venv/bin/python tests/frontend/generate_image_fixtures.py \
+../hyperflare-recipes/.venv/bin/python tests/frontend/generate_image_fixtures.py \
   "$SNAPSHOT" tests/frontend/qwen38_images.json \
   --binary-dir /tmp/flare-image-reference
 ```
