@@ -170,18 +170,15 @@ impl RequestScheduler {
             } else {
                 &self.prefill_catalog
             };
-            let terminal_only = self.prefill_requires_terminal_completion(request, cut);
+            let stop = self.terminal_completion_stop(request, cut);
             for &capacity in catalog {
                 let work = self.prefill_work_through(request, capacity, cut);
-                if work == 0 {
+                if work == 0 || stop.is_some_and(|stop| request.consumed_tokens as usize + work < stop) {
                     continue;
                 }
                 let first_output =
                     request.consumed_tokens + work as u64 == request.prompt_tokens as u64;
                 let kind = self.resolve_prefill_kind(request, capacity, work, cut);
-                if terminal_only && kind == GraphKind::Prefill {
-                    continue;
-                }
                 consider(
                     kind,
                     1,

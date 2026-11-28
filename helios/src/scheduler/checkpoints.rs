@@ -103,7 +103,7 @@ fn aligned_endpoints(smallest: usize, chunk: usize, end: usize) -> Vec<usize> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct PrefillCatalogCost {
+pub(super) struct PrefillCatalogCost {
     capacity: usize,
     has_terminal: bool,
     non_terminal_ns: Option<u64>,
@@ -199,7 +199,7 @@ impl RequestScheduler {
     /// Each prefill capacity this request can use, with its measured non-terminal and terminal
     /// costs when known and nonzero. Selection reads the costs once instead of once per chunk of
     /// every interval.
-    fn prefill_catalog_costs(&self, request: &LiveRequest) -> Vec<PrefillCatalogCost> {
+    pub(super) fn prefill_catalog_costs(&self, request: &LiveRequest) -> Vec<PrefillCatalogCost> {
         let catalog = if request.prompt_logprobs {
             &self.scored_prefill_catalog
         } else {
@@ -244,7 +244,7 @@ impl RequestScheduler {
             .collect()
     }
 
-    fn interval_prefill_ns(
+    pub(super) fn interval_prefill_ns(
         request: &LiveRequest,
         catalog: &[PrefillCatalogCost],
         terminal_window: usize,
@@ -346,7 +346,9 @@ impl RequestScheduler {
                 let is_terminal = entry.has_terminal
                     && (through >= end
                         || (terminal_window > 0 && end.saturating_sub(through) <= terminal_window));
-                if terminal_only && !is_terminal {
+                // As `terminal_completion_stop` does for dispatch: when one terminal chunk can
+                // finish the interval, only a chunk that does is priced.
+                if terminal_only && through < end {
                     continue;
                 }
                 let adds_work = work > max_work;
