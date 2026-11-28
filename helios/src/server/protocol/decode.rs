@@ -190,7 +190,45 @@ fn chat_messages(body: &Value) -> Result<Vec<Message>> {
         })
         .collect()
 }
-fn anthropic_messages(body: &Value, hints: &mut Vec<(usize, usize)>) -> Result<Vec<Message>> {
+/// Whether Messages content holds nothing: it is absent, an empty string or
+/// array, or only empty text blocks.
+fn messages_content_is_empty(content: &Value) -> bool {
+    match content {
+        Value::Null => true,
+        Value::String(text) => text.is_empty(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .all(|block| block["type"] == "text" && block["text"] == ""),
+        _ => false,
+    }
+}
+/// Reads the content of a Messages `tool_result`. A `tool_reference` block
+/// reads as the name of the tool it references, which must be declared in
+/// `tools`; every tool is declared in the prompt, so the name is all the block
+/// carries.
+fn tool_result_parts(content: &Value, tools: &[Tool]) -> Result<Vec<Part>> {
+    let Some(blocks) = content.as_array() else {
+        return plain_parts(content, Protocol::Messages);
+    };
+    let mut parts = vec![];
+    for block in blocks {
+        if block["type"] != "tool_reference" {
+            parts.extend(plain_parts(&json!([block]), Protocol::Messages)?);
+            continue;
+        }
+        let name = field(block, "tool_name")?;
+        if !tools.iter().any(|tool| tool.native_name() == name) {
+            return Err(format!("tool reference {name:?} is not declared in tools").into());
+        }
+        parts.push(Part::Text(name.into()));
+    }
+    Ok(parts)
+}
+fn anthropic_messages(
+    body: &Value,
+    tools: &[Tool],
+    hints: &mut Vec<(usize, usize)>,
+) -> Result<Vec<Message>> {
     let mut messages = vec![];
     if present(body, "system") {
         messages.push(Message {
@@ -199,13 +237,23 @@ fn anthropic_messages(body: &Value, hints: &mut Vec<(usize, usize)>) -> Result<V
             phase: None,
         });
     }
-    for v in array(body, "messages")? {
+    let source = array(body, "messages")?;
+    for (index, v) in source.iter().enumerate() {
         let role = match field(v, "role")? {
             "user" => Role::User,
             "assistant" => Role::Assistant,
             "system" => Role::System,
             _ => return Err("Messages roles must be user, assistant, or system".into()),
         };
+        if role != Role::System
+            && messages_content_is_empty(&v["content"])
+            && !(role == Role::Assistant && index + 1 == source.len())
+        {
+            return Err(format!(
+                "messages.{index}: all messages must have non-empty content except for the optional final assistant message"
+            )
+            .into());
+        }
         let mut parts = vec![];
         if let Some(blocks) = v["content"].as_array() {
             for block in blocks {
@@ -220,10 +268,16 @@ fn anthropic_messages(body: &Value, hints: &mut Vec<(usize, usize)>) -> Result<V
                         arguments: arguments(&block["input"])?,
                         arguments_source: block["input"].as_str().map(str::to_owned),
                     }],
+                    "redacted_thinking" => {
+                        // The encrypted payload is unreadable here, so the block
+                        // adds nothing to the prompt.
+                        field(block, "data")?;
+                        vec![]
+                    }
                     "tool_result" => vec![Part::ToolResult {
                         id: Some(field(block, "tool_use_id")?.into()),
                         name: None,
-                        content: plain_parts(&block["content"], Protocol::Messages)?,
+                        content: tool_result_parts(&block["content"], tools)?,
                         is_error: flag(block, "is_error", false)?,
                     }],
                     _ => plain_parts(&json!([block]), Protocol::Messages)?,
@@ -838,7 +892,7 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
     let input = match protocol {
         Protocol::Chat => Input::Conversation(chat_messages(&body)?),
         Protocol::Messages => {
-            let messages = anthropic_messages(&body, &mut checkpoint_hints)?;
+            let messages = anthropic_messages(&body, &tools, &mut checkpoint_hints)?;
             if messages.last().is_some_and(|m| m.role == Role::Assistant) {
                 options
                     .template
@@ -928,6 +982,170 @@ mod tests {
             assert!(string_stops(Some(&value)).is_err(), "{value}");
         }
     }
+    #[test]
+    fn messages_tool_references_read_as_declared_tool_names() {
+        let tools = json!([{"name":"lookup","input_schema":{"type":"object"}},
+            {"name":"search","input_schema":{"type":"object"}}]);
+        let body = |tools: &Value, name: &str| {
+            json!({"max_tokens":8,"tools":tools,"messages":[
+                {"role":"user","content":"Find a tool"},
+                {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"search","input":{}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":[
+                    {"type":"text","text":"Matches:"},
+                    {"type":"tool_reference","tool_name":name}]}]}]})
+        };
+        let decoded = decode(Protocol::Messages, body(&tools, "lookup"), false).unwrap();
+        let Input::Conversation(messages) = &decoded.request.input else {
+            panic!()
+        };
+        assert_eq!(
+            messages[2].parts,
+            [Part::ToolResult {
+                id: Some("a".into()),
+                name: None,
+                content: vec![Part::Text("Matches:".into()), Part::Text("lookup".into())],
+                is_error: false,
+            }]
+        );
+        for declared in [&tools, &json!([]), &Value::Null] {
+            let error = decode(Protocol::Messages, body(declared, "missing"), false)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(
+                error.contains("\"missing\"") && error.contains("not declared"),
+                "{error}"
+            );
+        }
+        // Only a tool result carries references.
+        let error = decode(
+            Protocol::Messages,
+            json!({"max_tokens":8,"tools":tools,"messages":[{"role":"user","content":[
+                {"type":"tool_reference","tool_name":"lookup"}]}]}),
+            false,
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("tool_reference"), "{error}");
+    }
+
+    #[test]
+    fn messages_omit_redacted_thinking_blocks() {
+        let body = |blocks: Value| {
+            json!({"max_tokens":8,"messages":[
+                {"role":"user","content":"Hi"},
+                {"role":"assistant","content":blocks},
+                {"role":"user","content":"Again"}]})
+        };
+        let parts = |blocks: Value| {
+            let decoded = decode(Protocol::Messages, body(blocks), false).unwrap();
+            let Input::Conversation(messages) = decoded.request.input else {
+                panic!()
+            };
+            messages[1].parts.clone()
+        };
+        let redacted = json!({"type":"redacted_thinking","data":"EuwBCkQ"});
+        let text = json!({"type":"text","text":"Hello"});
+        assert_eq!(
+            parts(json!([redacted.clone(), text.clone()])),
+            [Part::Text("Hello".into())]
+        );
+        assert_eq!(parts(json!([redacted.clone()])), []);
+        assert!(
+            decode(
+                Protocol::Messages,
+                body(json!([{"type":"redacted_thinking"}, text])),
+                false
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn messages_reject_empty_content_except_in_a_final_assistant_message() {
+        let user = json!({"role":"user","content":"Hi"});
+        let answer = json!({"role":"assistant","content":"Ok"});
+        let decode_messages = |messages: Vec<Value>| {
+            decode(
+                Protocol::Messages,
+                json!({"max_tokens":8,"messages":messages}),
+                false,
+            )
+        };
+        let empty = [
+            json!(""),
+            json!([]),
+            json!([{"type":"text","text":""}]),
+            json!([{"type":"text","text":""},{"type":"text","text":""}]),
+            Value::Null,
+        ];
+        for content in &empty {
+            for (index, role) in [(0, "user"), (1, "assistant"), (2, "user")] {
+                let mut messages = vec![user.clone(), answer.clone(), user.clone()];
+                messages[index] = json!({"role":role,"content":content});
+                let error = decode_messages(messages).err().unwrap().to_string();
+                assert!(
+                    error.contains(&format!(
+                        "messages.{index}: all messages must have non-empty content"
+                    )),
+                    "{role} {content}: {error}"
+                );
+            }
+            // A final assistant message is a prefill.
+            let decoded = decode_messages(vec![
+                user.clone(),
+                json!({"role":"assistant","content":content}),
+            ])
+            .unwrap();
+            assert_eq!(
+                decoded.request.options.template["continue_final_message"],
+                true
+            );
+            // An empty assistant message that is not final is rejected.
+            assert!(
+                decode_messages(vec![
+                    json!({"role":"assistant","content":content}),
+                    user.clone()
+                ])
+                .is_err()
+            );
+        }
+        let image = json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}});
+        for content in [
+            json!(" "),
+            json!([{"type":"text","text":" "}]),
+            json!([{"type":"tool_use","id":"a","name":"run","input":{}}]),
+            json!([{"type":"tool_result","tool_use_id":"a","content":""}]),
+            json!([{"type":"thinking","thinking":"Plan"}]),
+            json!([image]),
+        ] {
+            for role in ["user", "assistant"] {
+                assert!(
+                    decode_messages(vec![
+                        user.clone(),
+                        json!({"role":role,"content":content}),
+                        user.clone()
+                    ])
+                    .is_ok(),
+                    "{role} {content}"
+                );
+            }
+        }
+        // Empty system messages remain omitted rather than rejected.
+        for content in &empty {
+            let decoded = decode_messages(vec![
+                json!({"role":"system","content":content}),
+                user.clone(),
+            ])
+            .unwrap();
+            let Input::Conversation(messages) = decoded.request.input else {
+                panic!()
+            };
+            assert_eq!(messages.len(), 1);
+        }
+    }
+
     #[test]
     fn response_tool_arguments_round_trip_without_changing_json_types() {
         let expected = serde_json::json!({"query":"café 世界","options":{"count":2,"enabled":true,"none":null,"items":[1,"✓"]}});
@@ -2229,5 +2447,121 @@ mod native_prompt_tests {
             .unwrap()
             .to_string();
         assert!(error.contains("empty conversation"), "{error}");
+    }
+
+    fn render_text(
+        native: &(Frontend, GrammarCompiler, crate::model::ModelConfig),
+        protocol: Protocol,
+        body: Value,
+    ) -> Result<String> {
+        let (frontend, compiler, config) = native;
+        let decoded = decode(protocol, body, false)?;
+        crate::server::request::prepare_inference(
+            frontend,
+            None,
+            compiler,
+            config,
+            &decoded.request,
+            0,
+            false,
+        )
+        .map(|prepared| prepared.rendered_prompt)
+    }
+
+    #[test]
+    fn chat_reasoning_effort_names_render_as_the_official_converter_does() {
+        let native = native(PromptEncoder::DeepseekV41);
+        let chat = |extra: Value| {
+            let mut body = json!({"messages":[{"role":"system","content":"Policy"},
+                {"role":"user","content":"Hello"}]});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            body
+        };
+        let mut rendered = std::collections::BTreeSet::new();
+        for effort in ["minimal", "low", "medium", "high", "xhigh", "max", "none"] {
+            let body = chat(json!({"reasoning_effort":effort}));
+            let text = render_text(&native, Protocol::Chat, body.clone()).unwrap();
+            assert_eq!(text, reference_prompt(Protocol::Chat, body), "{effort}");
+            rendered.insert(text);
+        }
+        // minimal and low, and medium and high, render alike; xhigh renders as
+        // high on V4.1; max and no thinking differ.
+        assert_eq!(rendered.len(), 4);
+        // An explicit thinking choice wins over `none`; the effort is then the default.
+        let thinking = json!({"enable_thinking":true,"reasoning_effort":"none"});
+        let text = render_text(&native, Protocol::Chat, chat(thinking)).unwrap();
+        assert_eq!(
+            text,
+            reference_prompt(Protocol::Chat, chat(
+                json!({"thinking":{"type":"enabled"},"reasoning_effort":"none"})
+            ))
+        );
+        assert_eq!(
+            text,
+            render_text(&native, Protocol::Chat, chat(json!({}))).unwrap()
+        );
+        // `none` also applies through chat_template_kwargs.
+        let nested = chat(json!({"chat_template_kwargs":{"reasoning_effort":"none"}}));
+        assert_eq!(
+            render_text(&native, Protocol::Chat, nested).unwrap(),
+            render_text(
+                &native,
+                Protocol::Chat,
+                chat(json!({"reasoning_effort":"none"}))
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn native_deepseek_effort_errors_list_the_accepted_values() {
+        for (encoder, numeric) in [
+            (PromptEncoder::DeepseekV4, false),
+            (PromptEncoder::DeepseekV41, true),
+        ] {
+            let native = native(encoder);
+            let body =
+                json!({"messages":[{"role":"user","content":"Hello"}],"reasoning_effort":"turbo"});
+            let error = render_text(&native, Protocol::Chat, body)
+                .err()
+                .unwrap()
+                .to_string();
+            for name in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+                assert!(error.contains(name), "{encoder:?} omits {name}: {error}");
+            }
+            assert_eq!(
+                error.contains("1 through 100"),
+                numeric,
+                "{encoder:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn effort_none_leaves_jinja_templates_their_own_semantics() {
+        let template = "{% for m in messages %}{{ m.content }}{% mark %}{% endfor %}effort={{ reasoning_effort }};thinking={{ enable_thinking }}";
+        let (frontend, compiler, mut config) =
+            renderer(PromptEncoder::Jinja, Some(template), TemplateEncoding::Text);
+        config.contract.frontend.rejected_tokens.clear();
+        let decoded = decode(
+            Protocol::Chat,
+            json!({"messages":[{"role":"user","content":"Hello"}],"reasoning_effort":"none"}),
+            false,
+        )
+        .unwrap();
+        let text = crate::server::request::prepare_inference(
+            &frontend,
+            None,
+            &compiler,
+            &config,
+            &decoded.request,
+            0,
+            false,
+        )
+        .unwrap()
+        .rendered_prompt;
+        assert!(text.ends_with("effort=none;thinking="), "{text}");
     }
 }

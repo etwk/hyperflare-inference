@@ -346,3 +346,12 @@
     on SM103 GPUs alongside --row-shard-prefill. Close each target when
     tensor-parallel export with replicated attention weights and native flare
     run serving pass on that hardware and transport.
+
+[ ] Keep `xhigh` distinct from `max` for the native DeepSeek encoders on Responses
+    and Messages. `reasoning.effort` and `output_config.effort` decode both to the
+    neutral `Effort::Max` (helios/src/server/protocol/decode.rs), which DeepSeek
+    renders as `max` (V4.1 score 100), while Chat Completions renders `xhigh` as
+    `xhigh` (score 75) and the official DeepSeek converters keep the two apart on
+    every protocol. Close when a Responses and a Messages request with `xhigh`
+    render the same prompt as the official converter, and prompt formats without
+    an `xhigh` level render what they render now.
