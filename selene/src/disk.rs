@@ -1406,8 +1406,19 @@ struct Ring {
 #[cfg(unix)]
 impl Ring {
     fn new() -> Result<Self> {
-        let ring = IoUring::new(RING_DEPTH as u32)
-            .map_err(|error| io_failure("create the disk thread's io_uring", error))?;
+        let ring = IoUring::new(RING_DEPTH as u32).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                Error::caused_by(
+                    format!(
+                        "create the disk thread's io_uring: {error}; the process's seccomp \
+                         policy or kernel.io_uring_disabled refuses io_uring (docs/container.md)"
+                    ),
+                    error,
+                )
+            } else {
+                io_failure("create the disk thread's io_uring", error)
+            }
+        })?;
         Ok(Self {
             ring,
             slots: vec![Chunk::default(); RING_DEPTH],
