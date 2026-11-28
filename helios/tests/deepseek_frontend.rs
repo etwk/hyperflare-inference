@@ -8,9 +8,14 @@
 use flare_helios::{frontend, model, scheduler};
 #[path = "support/frontend.rs"]
 mod support;
+#[path = "support/instruction_prefix.rs"]
+mod instruction_prefix;
+#[path = "support/native_prefix.rs"]
+mod native_prefix;
 use deepseek_recipe_core::{conversation::Conversation, messages::InputMessage};
 use deepseek_recipe_encoding::{PromptEncoding, dsv41::DeepseekV41Encoding};
 use flare_helios::frontend::{Asset, Frontend, FrontendAssets, FrontendSettings, PromptEncoder};
+use flare_helios::{grammar::GrammarCompiler, server::prepare_request};
 use serde_json::{Map, json};
 use sha2::{Digest, Sha256};
 
@@ -140,4 +145,53 @@ fn official_encoder_renders_and_initializes_native_output_state() {
     )
     .unwrap();
     assert!(!(output.content.start == flare_helios::output::tagged::OutputStart::Reasoning));
+}
+
+#[test]
+#[ignore = "requires FLARE_DEEPSEEK_TEST_SNAPSHOT pointing to DeepSeek-V4.1-Flash-1017"]
+fn developer_messages_and_billing_headers_keep_checkpoint_token_prefixes() {
+    let root = std::path::PathBuf::from(std::env::var_os("FLARE_DEEPSEEK_TEST_SNAPSHOT").unwrap());
+    let asset = |path: std::path::PathBuf| Asset {
+        sha256: format!("{:x}", Sha256::digest(std::fs::read(&path).unwrap())),
+        path,
+        range: None,
+    };
+    let tokens = support::tokens(&asset(root.join("tokenizer_config.json"))).unwrap();
+    let frontend = Frontend::load_with_settings(
+        FrontendAssets {
+            tokenizer: asset(root.join("tokenizer.json")),
+            tokens: tokens.clone(),
+            chat_template: None,
+        },
+        Map::new(),
+        &FrontendSettings {
+            tokenizer: tokens,
+            eos_token_ids: vec![],
+            prompt_encoder: PromptEncoder::DeepseekV41,
+            image_placeholder_token_id: None,
+            template_encoding: Default::default(),
+            image: None,
+        },
+    )
+    .unwrap();
+    let mut config = support::model_config(support::contract("deepseek41"));
+    config.eos_token_ids = vec![
+        frontend
+            .tokenizer()
+            .token_to_id("<｜end▁of▁sentence｜>")
+            .unwrap(),
+    ];
+    let delimiters =
+        model::reasoning_delimiter_tokens(&frontend, &config.contract.frontend).unwrap();
+    let compiler = GrammarCompiler::new(
+        frontend.tokenizer(),
+        config.contract.vocabulary,
+        &config.eos_token_ids,
+        &delimiters,
+    )
+    .unwrap();
+    instruction_prefix::check(&frontend, |mut body| {
+        body["model"] = config.model_id.clone().into();
+        prepare_request(&frontend, None, &compiler, &config, body).unwrap()
+    });
 }
