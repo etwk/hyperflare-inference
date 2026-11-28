@@ -54,12 +54,13 @@ Anthropic Messages, stateless Responses, authentication, and client configuratio
 
 ## 2. Commands
 
-The Python distribution and source package are named `ignition`. Install the
-preparation environment with `uv sync --locked --extra prepare --extra test`,
-then use `.venv/bin/ignition` or `.venv/bin/python -m ignition`.
+The Python distribution and source package are named `ignition`. Set up the
+preparation environment as described in
+[environment setup](model-preparation.md#environment-setup), then use
+`.venv/bin/ignition` in the recipes clone; `.venv/bin/python -m ignition` runs
+core Ignition without the official recipes.
 Preparation commands install version-checked runtime patches after setting the
-dependency environment; `uv run --locked --extra prepare ignition ...`
-uses the same startup path. See [environment setup](model-preparation.md#environment-setup)
+dependency environment. See [environment setup](model-preparation.md#environment-setup)
 for patch application in standalone Python tools.
 
 ```
@@ -636,7 +637,7 @@ Build the extension once, then start a TP2 DeepSeek V4 development server
 with recipe defaults:
 
 ```sh
-uv pip install --python .venv/bin/python --no-deps ./heliopause \
+uv pip install --python .venv/bin/python --no-deps ../hyperflare-inference/heliopause \
   --config-settings 'build-args=--features=qualification'
 .venv/bin/ignition debug-serve deepseek-v4-flash --gpus 0,1
 ```

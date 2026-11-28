@@ -233,15 +233,11 @@ Run commands from the repository root:
 cargo build --release --manifest-path flare-cli/Cargo.toml
 ```
 
-For local Python core `ignition` and `heliopause` development, install
-`heliopause/` and editable `ignition` into `.venv` (official model exports run
-from [`local-inference-lab/hyperflare-recipes`](https://github.com/local-inference-lab/hyperflare-recipes),
-which pins `uv.lock` and bundles the official recipes):
-
-```sh
-uv pip install --python .venv/bin/python --no-deps ./heliopause
-uv pip install --python .venv/bin/python --no-deps -e .
-```
+Set up the Python environment for `ignition` and `heliopause` as described in
+[environment setup](docs/model-preparation.md#environment-setup): it installs
+this checkout's `heliopause/` and editable `ignition` over the
+[`local-inference-lab/hyperflare-recipes`](https://github.com/local-inference-lab/hyperflare-recipes)
+lockfile.
 
 The [preparation guide](docs/model-preparation.md) owns environment setup,
 GPU selection, compiler and tuning resources, and core serving setup. Model-specific
@@ -276,10 +272,11 @@ Follow the
 
 ## Run tests
 
-Run Python tests from the repository root in the synchronized environment:
+Run Python tests from the repository root with the Python of the
+[preparation environment](docs/model-preparation.md#environment-setup):
 
 ```sh
-.venv/bin/python -m pytest tests/cli -q
+../hyperflare-recipes/.venv/bin/python -m pytest tests/cli -q
 ```
 
 Tests that need a GPU skip unless `FLARE_RUN_CUDA_TESTS=1`. Tensor-parallel tests

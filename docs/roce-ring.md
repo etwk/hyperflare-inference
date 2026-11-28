@@ -150,13 +150,9 @@ every peer's output alone does not release a rank's own send buffer.
 ## Preparation and serving
 
 Follow the [multi-host requirements](multi-host.md#requirements)
-first. Use the same Flare revision and locked preparation dependencies on every
-host. From each checkout root:
-
-```sh
-uv sync --locked --extra prepare --extra test
-cargo build --release --manifest-path flare-cli/Cargo.toml
-```
+first. Use the same Flare and recipes revisions on every host, and on each host
+follow [environment setup](model-preparation.md#environment-setup), including
+the native CLI build.
 
 Preparation and serving use proxy ABI 14. Its proxy holds eight packets in flight per sender and
 rail in ring mailboxes that the runtime allocates at startup, serves the pipelined reduce-scatter

@@ -67,10 +67,32 @@ A core's cache layouts are fixed when it is prepared.
 
 ## Environment setup
 
-Set up the preparation environment and build the native CLI:
+This repository has no lockfile. The preparation environment comes from
+[`local-inference-lab/hyperflare-recipes`](https://github.com/local-inference-lab/hyperflare-recipes),
+whose `uv.lock` pins the third-party stack, with this checkout's `heliopause` and
+`ignition` installed over it. Clone the recipes next to this checkout, under the
+default directory names `hyperflare-recipes` and `hyperflare-inference`, and run,
+in the recipes clone:
 
 ```sh
-uv sync --locked --extra prepare --extra test
+BUILD_NVEP=0 FLASHINFER_BUILD_NO_PIP=1 uv sync --locked --extra test \
+  --no-install-package ignition --no-install-package flare-heliopause
+uv pip install --python .venv/bin/python --no-deps ../hyperflare-inference/heliopause
+uv pip install --python .venv/bin/python --no-deps -e ../hyperflare-inference
+uv pip install --python .venv/bin/python --no-deps -e .
+```
+
+The order is fixed. The lockfile pins upstream `ignition` and `flare-heliopause`,
+so the sync skips them and the next two installs supply this checkout's. The
+recipes package goes last: it and `ignition` both ship an `ignition` console
+script, the last install wins, and only the recipes' script provides the official
+recipes (`python -m ignition` runs core Ignition without them). A later `uv sync`
+undoes the three installs; repeat them afterwards. In the commands of these
+documents, `.venv` is this environment, so run them from the recipes clone.
+
+Build the native CLI in this checkout:
+
+```sh
 cargo build --release --manifest-path flare-cli/Cargo.toml
 ```
 
@@ -99,10 +121,6 @@ from ignition import runtime_patches
 
 runtime_patches.apply()
 ```
-
-`python scripts/setup_preparation.py` updates FlashInfer to the tip of its `main`
-branch, syncs preparation and test dependencies, and rebuilds FlashInfer and
-Heliopause. It updates `uv.lock` when the branch advances.
 
 Build dependencies include a C/C++ compiler, CMake, Ninja, pkg-config, Protobuf's
 `protoc`, OpenSSL headers, Python headers, and liburing headers. On Ubuntu:
@@ -143,22 +161,18 @@ revision. Compare rendered prompts and token
 IDs with upstream when changing encoder behavior.
 
 The preparation dependency tracks the `main` branch of
-`local-inference-lab/flashinfer` in `pyproject.toml`; `uv.lock` records the
-resolved commit. `.github/workflows/track-flashinfer-main.yml` checks
-`local-inference-lab/flashinfer` `main` every 15 minutes and updates `uv.lock`
-on `main` when it advances, so `uv sync --locked --extra prepare --extra test`
-tracks `main` without manual pin edits. To pull an unmerged commit ahead of the
-scheduled refresh, run `uv lock --upgrade-package flashinfer-python` or
-`python scripts/setup_preparation.py`.
-For local FlashInfer development, install the sibling
-checkout explicitly with `uv pip install --python .venv/bin/python --no-deps -e ../flashinfer`;
-`uv sync --locked --extra prepare --extra test` restores the Git dependency.
+`local-inference-lab/flashinfer` in `pyproject.toml`; the recipes' `uv.lock`
+records the resolved commit, and `uv lock --upgrade-package flashinfer-python`
+in the recipes clone moves it. For local FlashInfer development, install the
+sibling checkout with
+`uv pip install --python .venv/bin/python --no-deps -e ../flashinfer`;
+`uv sync` restores the locked FlashInfer.
 Inspect that checkout and its local changes before modifying it. After changing
 Rust code in `heliopause/`, or Helios code used by the extension, rebuild the
 installed extension explicitly:
 
 ```sh
-uv pip install --python .venv/bin/python --no-deps ./heliopause
+uv pip install --python .venv/bin/python --no-deps ../hyperflare-inference/heliopause
 ```
 
 ## GPU selection
