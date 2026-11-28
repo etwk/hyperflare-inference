@@ -481,13 +481,11 @@ impl RequestScheduler {
             && request.checkpoints.window_ends.is_empty()
             && !request.prompt_logprobs
         {
-            // A chunk ending at a capture runs as a terminal prefill when the core has them.
-            let smallest = self
-                .terminal_prefill_catalog
-                .first()
-                .or(self.prefill_catalog.first())
-                .copied()
-                .unwrap_or(chunk);
+            // Stepping from the smallest prefill capacity leaves at most that capacity between the
+            // nearest position and the anchor, which the smallest graph covers. When that capacity is
+            // inside the tail-protection window, the graph computes complete continuation state
+            // itself, so the capture costs one small chunk instead of a second terminal prefill.
+            let smallest = self.prefill_catalog.first().copied().unwrap_or(chunk);
             candidates.extend(
                 aligned_endpoints(smallest, chunk, anchor)
                     .into_iter()
@@ -1349,6 +1347,50 @@ mod tests {
                 assert!(ends.len() <= 2 * doublings, "{prompt}: {ends:?}");
             }
         }
+    }
+
+    /// On a core whose terminal prefills cost about the same at every capacity, a capture that
+    /// left more than the smallest capacity before the anchor would add a second terminal prefill.
+    /// The nearest aligned position leaves a tail the smallest graph covers, inside the
+    /// tail-protection window, so it costs that graph and fits the allowance.
+    #[test]
+    fn the_nearest_aligned_cut_leaves_a_tail_the_smallest_graph_covers() {
+        let mut scheduler = super::super::tests::scheduler(1, 128, 16);
+        let caps = [128usize, 256, 512];
+        scheduler.prefill_graphs(&caps).unwrap();
+        scheduler.terminal_prefill_graphs(&[256, 512]).unwrap();
+        let mut graphs = super::super::tests::duration_graphs(1);
+        let terminal: Vec<_> = graphs
+            .iter()
+            .filter(|g| g.kind == GraphKind::Prefill && caps[1..].contains(&g.token_capacity))
+            .cloned()
+            .map(|mut g| {
+                g.kind = GraphKind::TerminalPrefill;
+                g.name = format!("terminal-{}", g.token_capacity);
+                g
+            })
+            .collect();
+        graphs.extend(terminal);
+        scheduler.graph_durations(&graphs).unwrap();
+        for (kind, capacity, nanos) in [
+            (GraphKind::Prefill, 128, 10_000),
+            (GraphKind::Prefill, 256, 20_000),
+            (GraphKind::Prefill, 512, 30_000),
+            (GraphKind::TerminalPrefill, 256, 220_000),
+            (GraphKind::TerminalPrefill, 512, 220_000),
+            (GraphKind::Snapshot, 1, 1),
+        ] {
+            measure(&mut scheduler, kind, capacity, nanos);
+        }
+        let mut spec = super::super::tests::spec(1500, 3);
+        spec.message_boundaries = vec![1497];
+        let handle = scheduler.admit(spec).unwrap();
+        let (selected, unknown, budget) =
+            scheduler.checkpoint_selection(scheduler.request(handle).unwrap());
+        assert_eq!((unknown, budget), (false, false));
+        assert_eq!(selected.initial_prefill_ns, Some(280_000));
+        let cuts: Vec<_> = selected.cuts.iter().map(|cut| (cut.endpoint, cut.split_ns)).collect();
+        assert_eq!(cuts, [(1408, 10_000), (1497, 0), (1500, 0)]);
     }
 
     /// A snapshot copy that has never run is unknown, which turns optional captures off. One

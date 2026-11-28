@@ -1452,8 +1452,11 @@ When the final message before the anchor is longer than one prefill chunk, a
 prefix shared inside it would otherwise have no endpoint. Aligned positions
 inside that message then compete after the boundaries, for the allowance they
 leave. Back from the anchor, they are the last multiple of each power of two,
-starting at the smallest terminal prefill capacity, or the smallest prefill
-capacity when the core has no terminal catalog. Forward from the prompt start,
+starting at the smallest prefill capacity. The nearest one leaves at most that
+capacity before the anchor, which the smallest graph covers. When that capacity
+is inside the tail-protection window, the graph computes complete continuation
+state itself, so the capture costs one small chunk instead of a second terminal
+prefill. Forward from the prompt start,
 they are the chunk size times each power of two. When the message starts the
 prompt, a request sharing more than one chunk of it can reuse more than half of
 the shared prefix. When the text after the shared part is shorter than the
