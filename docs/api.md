@@ -398,17 +398,35 @@ conversation messages from raw prompts. Conversation parts represent text,
 images, reasoning, tool calls, and tool results. Protocol decoders populate these
 types directly. `server/request.rs` lowers them into the prepared chat template
 and model frontend; no endpoint translates through another endpoint's JSON.
-When developer instructions are present, system and developer instructions become
-one leading system message. Instruction sections retain their role labels and
-request order; ordinary conversation messages retain their relative order.
-Conversations without developer messages use the template's native system-role
-rules where supported. The shared frontend probes the prepared template once for
-inline system-message support. If the template rejects or omits inline system
-text, noninitial system messages become user messages at the same positions,
-with their text wrapped in `<system>...</system>`. Text blocks are joined with
-blank lines. The leading system message and preceding conversation remain
-unchanged. This conversion supplies a textual role cue; it does not provide a
-native system role to models whose templates cannot represent one inline.
+Except for the native DeepSeek encoders described below, when developer
+instructions are present, system and developer instructions become one leading
+system message. Instruction sections retain their role labels and request order;
+ordinary conversation messages retain their relative order. Conversations
+without developer messages use the template's native system-role rules where
+supported. The shared frontend probes the prepared template once for inline
+system-message support. If the template rejects or omits inline system text,
+noninitial system messages become user messages at the same positions, with
+their text wrapped in `<system>...</system>`. Text blocks are joined with blank
+lines. The leading system message and preceding conversation remain unchanged.
+This conversion supplies a textual role cue; it does not provide a native system
+role to models whose templates cannot represent one inline.
+
+The native DeepSeek V4 and V4.1 prompt encoders skip this lowering. They treat a
+developer message as a system message and add no role labels. V4.1 renders each
+system message at its position in the conversation, so an instruction inserted
+mid-conversation does not change the prompt before it and cached prefixes of that
+prompt remain usable. V4 moves system messages to the start of the prompt.
+
+The same encoders remove an Anthropic billing header from system and developer
+text, as DeepSeek's official Chat Completions converter does. Anthropic clients
+such as Claude Code open their system prompt with a block that starts with
+`x-anthropic-billing-header`. It is accounting metadata, not instructions, and
+if its text differs between two requests, their first messages differ and no
+prefix-cache checkpoint after it matches. Text that starts with the header keeps
+what follows from the first newline or `You are`, whichever comes first, without
+leading whitespace. Text with neither is removed, and a system message left empty
+by the removal is omitted. A conversation with no message left is rejected. Other
+system text is unchanged.
 
 Text that a request supplies is ordinary text. A message, instruction, tool
 schema, tool argument or object key that spells a control token of the model

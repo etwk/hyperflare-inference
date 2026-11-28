@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::{
+    frontend::PromptEncoder,
     output::{Event, Termination},
     server::inference::{Input, Part, RawPrompt, ToolChoice, template_messages},
 };
@@ -154,8 +155,14 @@ fn named_tool_choices_decode_validate_and_preserve_messages() {
             assert_eq!(auto.options, named.options);
             let Input::Conversation(messages) = &named.input else { panic!() };
             assert_eq!(
-                template_messages(messages, named.tool_choice.clone(), &[], true).unwrap(),
-                template_messages(messages, ToolChoice::Auto, &[], true).unwrap(),
+                template_messages(
+                    messages,
+                    named.tool_choice.clone(),
+                    &[],
+                    PromptEncoder::Jinja
+                )
+                .unwrap(),
+                template_messages(messages, ToolChoice::Auto, &[], PromptEncoder::Jinja).unwrap(),
             );
             requests.push(named);
         }
@@ -301,8 +308,10 @@ fn required_tool_instruction_preserves_history_and_sampling() {
         let Input::Conversation(messages) = &required.input else {
             panic!()
         };
-        let baseline = template_messages(messages, ToolChoice::Auto, &[], true).unwrap();
-        let native = template_messages(messages, ToolChoice::Required, &[], true).unwrap();
+        let baseline =
+            template_messages(messages, ToolChoice::Auto, &[], PromptEncoder::Jinja).unwrap();
+        let native =
+            template_messages(messages, ToolChoice::Required, &[], PromptEncoder::Jinja).unwrap();
         assert_eq!(native[0]["role"], "system");
         assert!(
             native[0]["content"]
@@ -802,13 +811,39 @@ fn developer_and_system_instructions_lower_to_one_template_preamble() {
     let Input::Conversation(messages) = req.input else {
         panic!()
     };
-    let native = template_messages(&messages, ToolChoice::Auto, &[], true).unwrap();
+    let native = template_messages(&messages, ToolChoice::Auto, &[], PromptEncoder::Jinja).unwrap();
     assert_eq!(native.len(), 2);
     assert_eq!(
         native[0],
         json!({"role":"system","content":"System instructions:\nSystem policy\n\nDeveloper instructions:\nRepository rules\n\nDeveloper instructions:\nAdditional rules"})
     );
     assert_eq!(native[1]["role"], "user");
+}
+#[test]
+fn native_deepseek_encoders_receive_instructions_in_place_without_labels() {
+    let req = request(
+        Protocol::Responses,
+        json!({"instructions":"System policy", "input":[
+            {"role":"developer","content":"Repository rules"},
+            {"role":"user","content":"Do the task"},
+            {"role":"developer","content":"Additional rules"}
+        ]}),
+    );
+    let Input::Conversation(messages) = req.input else {
+        panic!()
+    };
+    for encoder in [PromptEncoder::DeepseekV4, PromptEncoder::DeepseekV41] {
+        assert_eq!(
+            template_messages(&messages, ToolChoice::Auto, &[], encoder).unwrap(),
+            vec![
+                json!({"role":"system","content":"System policy"}),
+                json!({"role":"developer","content":"Repository rules"}),
+                json!({"role":"user","content":"Do the task"}),
+                json!({"role":"developer","content":"Additional rules"}),
+            ],
+            "{encoder:?}"
+        );
+    }
 }
 #[test]
 fn response_history_retains_reasoning_calls_results_and_namespaces() {
@@ -823,7 +858,7 @@ fn response_history_retains_reasoning_calls_results_and_namespaces() {
     assert!(
         matches!(&messages[0].parts[..],[Part::Reasoning(_),Part::ToolCall{name,..}] if name=="shell__run")
     );
-    let native = template_messages(&messages, ToolChoice::Auto, &[], true).unwrap();
+    let native = template_messages(&messages, ToolChoice::Auto, &[], PromptEncoder::Jinja).unwrap();
     assert_eq!(native[0]["reasoning_content"], "Think");
     assert_eq!(native[0]["tool_calls"][0]["id"], "c");
     assert_eq!(native[1]["tool_call_id"], "c");
@@ -838,7 +873,7 @@ fn messages_accept_webp_image_sources() {
     let Input::Conversation(messages) = req.input else {
         panic!()
     };
-    let native = template_messages(&messages, ToolChoice::Auto, &[], true).unwrap();
+    let native = template_messages(&messages, ToolChoice::Auto, &[], PromptEncoder::Jinja).unwrap();
     assert_eq!(
         native[0]["content"][0]["image_url"]["url"],
         "data:image/webp;base64,AA=="
@@ -855,7 +890,7 @@ fn messages_accept_gif_image_sources() {
     let Input::Conversation(messages) = req.input else {
         panic!()
     };
-    let native = template_messages(&messages, ToolChoice::Auto, &[], true).unwrap();
+    let native = template_messages(&messages, ToolChoice::Auto, &[], PromptEncoder::Jinja).unwrap();
     assert_eq!(
         native[0]["content"][0]["image_url"]["url"],
         "data:image/gif;base64,AA=="
@@ -871,7 +906,7 @@ fn messages_preserve_mixed_tool_results_and_images() {
     let Input::Conversation(messages) = req.input else {
         panic!()
     };
-    let native = template_messages(&messages, ToolChoice::Auto, &[], true).unwrap();
+    let native = template_messages(&messages, ToolChoice::Auto, &[], PromptEncoder::Jinja).unwrap();
     assert_eq!(native.len(), 3);
     assert_eq!(native[0]["content"], "before");
     assert_eq!(native[1]["is_error"], true);
@@ -901,7 +936,7 @@ fn messages_preserve_inline_system_text_and_discard_message_controls() {
             panic!()
         };
         assert_eq!(
-            template_messages(&messages, ToolChoice::Auto, &[], true).unwrap(),
+            template_messages(&messages, ToolChoice::Auto, &[], PromptEncoder::Jinja).unwrap(),
             vec![
                 json!({"role":"system","content":"Initial instructions"}),
                 json!({"role":"user","content":"Hello"}),
@@ -1584,7 +1619,7 @@ fn chat_history_without_call_ids_retains_template_semantics() {
     let Input::Conversation(messages) = req.input else {
         panic!()
     };
-    let native = template_messages(&messages, ToolChoice::Auto, &[], true).unwrap();
+    let native = template_messages(&messages, ToolChoice::Auto, &[], PromptEncoder::Jinja).unwrap();
     assert_eq!(native.len(), 3);
     assert!(native[1]["tool_calls"][0].get("id").is_none());
     assert!(native[2].get("tool_call_id").is_none());
@@ -1603,7 +1638,7 @@ fn empty_text_messages_preserve_conversation_roles() {
         panic!()
     };
     assert_eq!(
-        template_messages(&messages, ToolChoice::Auto, &[], true).unwrap(),
+        template_messages(&messages, ToolChoice::Auto, &[], PromptEncoder::Jinja).unwrap(),
         vec![
             json!({"role":"system","content":""}),
             json!({"role":"user","content":""}),

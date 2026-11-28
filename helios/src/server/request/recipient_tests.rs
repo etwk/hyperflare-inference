@@ -109,7 +109,7 @@ fn recipient_request_preparation_preserves_protocols_tools_and_continuation() {
         messages,
         decoded.request.tool_choice.clone(),
         &decoded.request.checkpoint_hints,
-        true,
+        crate::frontend::PromptEncoder::Jinja,
     )
     .unwrap();
     assert_eq!(&normalized, messages_body["messages"].as_array().unwrap());

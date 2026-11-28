@@ -155,6 +155,14 @@ impl PromptEncoder {
         matches!(self, Self::DeepseekV4 | Self::DeepseekV41)
     }
 
+    /// Whether the encoder places system and developer messages itself: V4 moves
+    /// them to the start and V4.1 renders each where it occurs, both without role
+    /// labels. Other encoders receive them lowered into one leading system message
+    /// when a developer message is present.
+    pub fn renders_instruction_messages(self) -> bool {
+        matches!(self, Self::DeepseekV4 | Self::DeepseekV41)
+    }
+
     /// Whether the encoder renders failed tool results in its own syntax. Other
     /// encoders receive them prefixed with a text part saying the tool failed.
     pub fn renders_tool_errors(self) -> bool {
