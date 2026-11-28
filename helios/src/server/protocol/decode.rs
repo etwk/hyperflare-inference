@@ -10,6 +10,7 @@ use crate::{
     server::{inference::*, observation::ObservationOptions},
 };
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
 fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v.get(key)
@@ -203,10 +204,10 @@ fn messages_content_is_empty(content: &Value) -> bool {
     }
 }
 /// Reads the content of a Messages `tool_result`. A `tool_reference` block
-/// reads as the name of the tool it references, which must be declared in
-/// `tools`; every tool is declared in the prompt, so the name is all the block
-/// carries.
-fn tool_result_parts(content: &Value, tools: &[Tool]) -> Result<Vec<Part>> {
+/// reads as the name of the tool it references, which must be one of the
+/// `declared` tool names; every tool is declared in the prompt, so the name is
+/// all the block carries.
+fn tool_result_parts(content: &Value, declared: &HashSet<String>) -> Result<Vec<Part>> {
     let Some(blocks) = content.as_array() else {
         return plain_parts(content, Protocol::Messages);
     };
@@ -217,7 +218,7 @@ fn tool_result_parts(content: &Value, tools: &[Tool]) -> Result<Vec<Part>> {
             continue;
         }
         let name = field(block, "tool_name")?;
-        if !tools.iter().any(|tool| tool.native_name() == name) {
+        if !declared.contains(name) {
             return Err(format!("tool reference {name:?} is not declared in tools").into());
         }
         parts.push(Part::Text(name.into()));
@@ -229,6 +230,7 @@ fn anthropic_messages(
     tools: &[Tool],
     hints: &mut Vec<(usize, usize)>,
 ) -> Result<Vec<Message>> {
+    let declared: HashSet<String> = tools.iter().map(Tool::native_name).collect();
     let mut messages = vec![];
     if present(body, "system") {
         messages.push(Message {
@@ -277,7 +279,7 @@ fn anthropic_messages(
                     "tool_result" => vec![Part::ToolResult {
                         id: Some(field(block, "tool_use_id")?.into()),
                         name: None,
-                        content: tool_result_parts(&block["content"], tools)?,
+                        content: tool_result_parts(&block["content"], &declared)?,
                         is_error: flag(block, "is_error", false)?,
                     }],
                     _ => plain_parts(&json!([block]), Protocol::Messages)?,
