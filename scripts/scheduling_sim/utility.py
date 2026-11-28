@@ -105,8 +105,10 @@ class UtilityScheduler:
     """Value-rate selection with separable proportional-fairness prices.
 
     The stationary utility is intrinsic useful work per time plus weighted log
-    token and delivery rates. Prefill has no per-chunk delivery utility. Actual
-    completions update prices; speculative expectations only score choices.
+    token and delivery rates. A prompt's first output is a delivery; each prefill
+    chunk earns the share of that delivery's value equal to the share of the
+    remaining prompt it completes. Actual completions update prices; speculative
+    expectations only score choices.
     """
 
     def __init__(self, value: Value, config: UtilityConfig):
@@ -115,6 +117,7 @@ class UtilityScheduler:
         self.prices: dict[str, RequestPrices] = {}
         self.log_scale = 0.0
         self.ages: dict[str, tuple[float, float, float]] = {}
+        self.first_outputs: dict[str, tuple[float, float]] = {}
         self._references: dict[str, float] = {}
         self._token_normalizers: set[str] = set()
         self._delivery_normalizers: set[str] = set()
@@ -131,18 +134,28 @@ class UtilityScheduler:
         self._delivery_normalizers.clear()
         self._mask_unknown_prices = mask_unknown_prices
         self.ages.clear()
+        self.first_outputs.clear()
         measured = catalog if known_graphs is None else tuple(g for g in catalog if g.name in known_graphs)
-        decoding = sum(not view.remaining_prefill for view in views)
-        reference_ms = min((decoding * graph.duration_ms / min(decoding, graph.decode_capacity)
-                            for graph in measured if decoding and graph.decode_capacity), default=0.0)
+        rates = {}
         for view in views:
             actions = candidates([view], catalog, self.value)
             if not actions:
                 raise ValueError("the prepared catalog cannot advance a live request")
             observed = [a for a in actions if known_graphs is None or a.graph.name in known_graphs]
-            token_rate = max(((a.lanes[0].prefill + a.lanes[0].expected_output) / a.graph.duration_ms
-                              for a in observed), default=0.0)
-            delivery_rate = max((1 / a.graph.duration_ms for a in observed), default=0.0) if not view.remaining_prefill else 0
+            token_rate, launch_rate = max((((a.lanes[0].prefill + a.lanes[0].expected_output)
+                                            / a.graph.duration_ms, 1 / a.graph.duration_ms)
+                                           for a in observed), key=lambda rate: rate[0], default=(0.0, 0.0))
+            # A prompt's next delivery is its first output, reached through its most
+            # token-efficient prefill graph; a decoder's is its fastest graph.
+            delivery_rate = launch_rate if view.remaining_prefill else max(
+                (1 / a.graph.duration_ms for a in observed), default=0.0)
+            rates[view.name] = token_rate, delivery_rate
+        streams = sum(delivery_rate > 0 for _, delivery_rate in rates.values())
+        decoding = sum(not view.remaining_prefill for view in views)
+        decode_reference_ms = min((streams * graph.duration_ms / min(decoding, graph.decode_capacity)
+                                   for graph in measured if decoding and graph.decode_capacity), default=0.0)
+        for view in views:
+            token_rate, delivery_rate = rates[view.name]
             if view.name not in self.prices:
                 self.prices[view.name] = RequestPrices(None, None, view.weight)
             prices = self.prices[view.name]
@@ -154,6 +167,7 @@ class UtilityScheduler:
                 prices.tokens.rebase(token_rate)
             if delivery_rate:
                 self._delivery_normalizers.add(view.name)
+                reference_ms = streams / delivery_rate if view.remaining_prefill else decode_reference_ms
                 if prices.deliveries is None:
                     prices.deliveries = ServicePrice.initial(
                         self.config.delivery_fairness * view.weight, delivery_rate, 1)
@@ -161,25 +175,42 @@ class UtilityScheduler:
                 prices.deliveries.rebase(delivery_rate)
                 self._references[view.name] = reference_ms
             reference = self._references.get(view.name)
-            if not view.remaining_prefill and reference is not None and (
-                    delivery_rate or not mask_unknown_prices):
-                self.ages[view.name] = (now_ms - view.last_service_ms,
-                                       reference, view.weight)
+            if reference is not None and (delivery_rate or not mask_unknown_prices):
+                last_output = view.arrival_ms if view.remaining_prefill else view.last_service_ms
+                self.ages[view.name] = (now_ms - last_output, reference, view.weight)
+                if view.remaining_prefill and token_rate:
+                    self.first_outputs[view.name] = (view.remaining_prefill + 1,
+                                                     (view.remaining_prefill + 1) / token_rate)
         self.log_scale = max([0.0, log(self.value.decode_value),
                              log(self.config.age_price) if self.config.age_price else float("-inf"),
                              *(price.log_price - log(price.maximum_rate)
                                     for row in self.prices.values()
                                     for price in (row.tokens, row.deliveries) if price is not None)])
 
+    def delivery_share(self, lane: Lane) -> float:
+        """Fraction of the lane's next delivery that this lane completes."""
+        if lane.name in self.first_outputs:
+            return (lane.prefill + lane.expected_output) / self.first_outputs[lane.name][0]
+        return float(lane.expected_output > 0)
+
     def lane_value(self, lane: Lane) -> float:
         prices = self.prices[lane.name]
         work = exp(-self.log_scale) * lane.useful_work(self.value)
         if prices.tokens is not None and (not self._mask_unknown_prices or lane.name in self._token_normalizers):
             work += prices.tokens.value(lane.prefill + lane.expected_output, self.log_scale)
-        if prices.deliveries is not None and lane.expected_output > 0 and (
+        if prices.deliveries is not None and (
                 not self._mask_unknown_prices or lane.name in self._delivery_normalizers):
-            work += prices.deliveries.value(1, self.log_scale)
+            work += prices.deliveries.value(self.delivery_share(lane), self.log_scale)
         return work
+
+    def age_value(self, lane: Lane, duration_ms: float) -> float:
+        """Age continuation for the delivery share; a prompt's age runs to its first output."""
+        if lane.name not in self.ages:
+            return 0.0
+        age, reference, weight = self.ages[lane.name]
+        horizon = self.first_outputs[lane.name][1] if lane.name in self.first_outputs else duration_ms
+        return (exp(-self.log_scale) * self.config.age_price * weight * reference
+                * self.delivery_share(lane) * (age + horizon))
 
     def score(self, action: Action, *, preceding_ms: float = 0.0) -> float:
         """Value a delivery graph after any non-delivering prerequisite work."""
@@ -188,17 +219,13 @@ class UtilityScheduler:
         duration = preceding_ms + action.graph.duration_ms
         graph = replace(action.graph, duration_ms=duration)
         reward = sum(self.action_lane_value(lane, graph) for lane in action.lanes)
+        # A prompt's clock can only reset at its first output; its waiting is priced there.
         reward -= (exp(-self.log_scale) * self.config.age_price * duration * duration / 2
-                   * sum(w for _, _, w in self.ages.values()))
+                   * sum(w for name, (_, _, w) in self.ages.items() if name not in self.first_outputs))
         return reward / duration
 
     def action_lane_value(self, lane: Lane, graph: Graph) -> float:
-        reward = self.lane_value(lane)
-        if lane.name in self.ages and lane.expected_output > 0:
-            age, reference, weight = self.ages[lane.name]
-            reward += (exp(-self.log_scale) * self.config.age_price * weight * reference
-                       * (age + graph.duration_ms))
-        return reward
+        return self.lane_value(lane) + self.age_value(lane, graph.duration_ms)
 
     def choose(self, views: list[View], catalog: tuple[Graph, ...], now_ms: float = 0.0) -> Action:
         self.prepare(views, catalog, now_ms)

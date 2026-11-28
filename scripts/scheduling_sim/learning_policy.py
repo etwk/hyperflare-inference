@@ -162,11 +162,7 @@ class LearningScheduler:
                      spec.prefill_capacity, spec.decode_capacity, spec.width)
 
     def _unknown_lane_value(self, lane: Lane) -> float:
-        value = self.utility.lane_value(lane)
-        if lane.expected_output > 0 and lane.name in self.utility.ages:
-            age, reference, weight = self.utility.ages[lane.name]
-            value += exp(-self.utility.log_scale) * self.utility.config.age_price * weight * reference * age
-        return value
+        return self.utility.lane_value(lane) + self.utility.age_value(lane, 0.0)
 
     def _actions(self, views: list[View], costs: dict[str, float | None],
                  *, filter_unknown_padding: bool = True) -> list[Action]:

@@ -154,6 +154,11 @@ impl RequestScheduler {
             if let Some(ns) = ns.filter(|n| *n > 0)
             {
                 let per_ms = 1e6 / ns as f64;
+                if prefill && tokens * per_ms > token_rate {
+                    // A prompt's next delivery is its first output, which its most
+                    // token-efficient prefill graph advances.
+                    delivery_rate = per_ms;
+                }
                 token_rate = token_rate.max(tokens * per_ms);
                 if delivery {
                     delivery_rate = delivery_rate.max(per_ms);
@@ -232,7 +237,11 @@ impl RequestScheduler {
                     if work > 0 {
                         let first =
                             request.consumed_tokens + work as u64 == request.prompt_tokens as u64;
-                        token_rate = token_rate.max((work as f64 + f64::from(first)) * per_ms);
+                        let rate = (work as f64 + f64::from(first)) * per_ms;
+                        if rate > token_rate {
+                            delivery_rate = per_ms;
+                        }
+                        token_rate = token_rate.max(rate);
                     }
                 } else if request.generated_tokens > 0
                     && request.generated_tokens < request.max_new_tokens

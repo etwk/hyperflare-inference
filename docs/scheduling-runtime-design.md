@@ -196,8 +196,11 @@ output token: beta + f/x
 output delivery: g/z
 ```
 
-Only decoding requests have a delivery coordinate or output-age cost. Normalized
-service prices follow the entropy-dual update in `scheduling-utility.md`. When a
+A request awaiting its first output also has a delivery coordinate: that output
+is its next delivery, so its feasible delivery rate is the launch rate of its
+most token-efficient prefill or mixed graph. Its output age runs from arrival.
+Normalized service prices follow the entropy-dual update in
+`scheduling-utility.md`. When a
 prefilling request's maximum feasible token rate changes between chunks (for
 example from a faster intermediate `PREFILL` chunk to a slower
 `TERMINAL_PREFILL` chunk or a short prompt tail), `ServicePrice::rebase`
@@ -217,21 +220,35 @@ acceptance is estimated per request, started from the population mean when the
 model reports no GPU confidence, and respects available proposals, grammar and stop
 restrictions, output limits, and remaining context.
 
-Let `T` be the graph duration in milliseconds and `A_i` the age of a decoding
-request's last visible output. The reference interval `sigma_i` uses the fastest
-batch-feasible delivery rate. For `K` delivery-bearing streams and a family of
-`k` streams, choose the measured graph minimizing `T/min(batch_capacity,k)`;
-then `sigma_i = K*T/min(batch_capacity,k)`. This corresponds to independent
-uniform cohorts within each family and wall-time shares proportional to family
-size. Prefill-only requests do not enlarge `K`. Multistage blocked streams use
-an individual future-delivery reference.
+Let `T` be the graph duration in milliseconds and `A_i` the age of request `i`'s
+last visible output, or of its arrival before the first output. The reference
+interval `sigma_i` uses the fastest batch-feasible delivery rate. For `K`
+delivery-bearing streams, including requests awaiting their first output, and a
+family of `k` streams, choose the measured graph minimizing
+`T/min(batch_capacity,k)`; then `sigma_i = K*T/min(batch_capacity,k)`. This
+corresponds to independent uniform cohorts within each family and wall-time
+shares proportional to family size. A prompt's reference is `K` times the
+duration of the graph that sets its delivery rate. Multistage blocked streams
+use an individual future-delivery reference.
 For a ready inference graph, selection maximizes
 
 ```text
 (sum of expected priced token and delivery service
- + sum over served decoders of c_i*sigma_i*(A_i+T)) / T
+ + sum over served decoders of c_i*sigma_i*(A_i+T)
+ + sum over prompt chunks of s_i*c_i*sigma_i*(A_i+R_i)) / T
  - T/2 * sum over active decoders of c_i.
 ```
+
+A prompt with `n` tokens left before its first output reaches that output after
+`n+1` tokens of service, which takes `R_i=(n+1)/x_i` at its feasible token rate
+`x_i`. A chunk consuming `u` prompt tokens, plus the first output when it
+finishes the prompt, completes the share `s_i=(u+first)/(n+1)` of that delivery.
+It earns that share of the delivery price and of the age continuation, valued at
+the age the first output will have when it arrives. A prompt's clock resets only
+at its first output, which this continuation already prices, so prompts are
+absent from the waiting-cost sum. Because `s_i` is proportional to consumed
+tokens, a prompt's delivery value does not favor a smaller chunk over a larger
+one; it raises the prompt's value relative to decode.
 
 All values in one decision share a positive scaling factor to keep large prices
 representable. `ScheduledPlan::selection_value_rate()` exposes the scaled score;
@@ -278,8 +295,9 @@ and clips work to that candidate's capacity. Refresh and discovery plans
 retain their capacities and clip work to fit. Atomic image spans, feature windows,
 and prompt length also restrict logical work. A graph with 64 useful prompt tokens
 earns 64 prompt units and at most one output token, regardless of physical capacity.
-Candidate scoring has no smallest-fitting-shape filter, duration ceiling, forced
-oldest-request filter, or per-chunk prefill lateness cost.
+Candidate scoring has no smallest-fitting-shape filter, duration ceiling, or
+forced oldest-request filter. A prompt's lateness enters only through its share
+of the first-output continuation.
 
 When a prepared model registers `TERMINAL_PREFILL` graphs for a subset of
 aligned prefill capacities, Helios infers the tail-protection window as the
@@ -304,9 +322,10 @@ larger capacities that consume no additional tokens and unmeasured non-target
 capacities on terminal-prefill catalogs, and it applies the same rule for a chunk
 that can reach its stop, so a cut is priced at the chunks dispatch will run.
 
-With no active decoder, the age term vanishes. Fully occupied large prefill
-graphs win when their useful value rate is highest. With decoding streams, a
-smaller prefill can win near a throughput knee because it imposes less waiting.
+With no active decoder, the waiting cost vanishes and prompt delivery value is
+proportional to consumed tokens. Fully occupied large prefill graphs win when
+their useful value rate is highest. With decoding streams, a smaller prefill
+can win near a throughput knee because it imposes less waiting.
 Increasing a stream's output age raises its delivery value; it does not make
 inefficient operations mandatory at a fixed deadline.
 
@@ -521,8 +540,10 @@ reported before processing another completion, so the correction never rewinds
 through later service observations. Output age uses the actual host publication
 time independently of device service accounting.
 
-A first published burst initializes a missing delivery history to one delivery
-over its measured frame duration. Token and delivery prices are stored in
+A request with a feasible delivery rate, including a prompt awaiting its first
+output, starts its delivery history from its batch-feasible reference interval.
+A first published burst initializes a still-missing delivery history to one
+delivery over its measured frame duration. Token and delivery prices are stored in
 physical service units. Phase transitions, acceptance updates, and timing
 normalizer changes preserve those prices until actual service changes them.
 
@@ -616,7 +637,7 @@ Defaults specify these preferences:
 | `output_token_value` | 64 | Prompt-value units per output token |
 | `token_fairness` | 16 | Token-rate log-utility coefficient, value/ms |
 | `delivery_fairness` | 4 | Delivery-rate log-utility coefficient, value/ms |
-| `decode_age_price` | 0.1 | Linear output-age cost coefficient, value/ms² |
+| `decode_age_price` | 0.1 | Linear output-age cost coefficient, including the wait for a first output, value/ms² |
 | `terminal_value` | 256 | Value per terminal retirement, in prompt-token units |
 | `terminal_age_price` | 1 | Linear terminal-wait cost coefficient, value/ms² |
 | `adaptation_ms` | 100 | Service-price adaptation time |
