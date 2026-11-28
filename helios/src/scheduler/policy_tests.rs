@@ -4346,6 +4346,12 @@ fn fixed_host_prefixes_preserve_lengths_above_255() {
     assert_eq!(plan.token_capacity, 257);
 }
 
+/// Turns off optional checkpoint captures, for tests that price how a prompt's chunks are
+/// chosen: an accepted capture inside the prompt ends a chunk there as a terminal prefill.
+fn without_optional_captures(s: &mut RequestScheduler) {
+    s.configure_policy(PolicyConfig { checkpoint_extra_work_fraction: 0.0, ..s.policy }).unwrap();
+}
+
 fn engine_with_terminal_prefill(terminal_capacities: &[usize]) -> RequestScheduler {
     let mut s = engine(1, false);
     s.prefill_graphs(&[64, 128, 256, 512]).unwrap();
@@ -4410,6 +4416,15 @@ fn run_prefill_sequence(
         let fence = Fence(s.submitted.0 + 1);
         s.commit(&plan, fence).unwrap();
         complete(s, &plan, fence, 0, false);
+        let request = s.request(handle).unwrap();
+        if request.phase == RequestPhase::Snapshot && request.consumed_tokens < request.prompt_tokens as u64 {
+            // A capture inside the prompt; the sequence lists prefill chunks only.
+            let capture = s.plan().unwrap();
+            assert_eq!(capture.kind, GraphKind::Snapshot);
+            let fence = Fence(s.submitted.0 + 1);
+            s.commit(&capture, fence).unwrap();
+            complete(s, &capture, fence, 0, false);
+        }
         if s.request(handle).unwrap().phase != RequestPhase::Prefill {
             break;
         }
@@ -4463,6 +4478,7 @@ fn terminal_prefill_selects_last_chunk_and_protects_small_tail_window() {
     // chunk 0 runs Prefill(256) (leaving 384 > 128), then chunk 1 runs TerminalPrefill(512)
     // (384 > 128 -> fresh SWA boundary). Still never leaves <= 128 tokens after an encoder-only chunk.
     let mut s = engine_with_terminal_prefill(&[256, 512]);
+    without_optional_captures(&mut s);
     let handle = add(&mut s, 4, 640, 4);
     assert_eq!(
         run_prefill_sequence(&mut s, handle),
@@ -4475,6 +4491,7 @@ fn terminal_prefill_selects_last_chunk_and_protects_small_tail_window() {
     // 641 = 512 + 129: chunk 0 leaves 129 > window (128), so chunk 0 runs encoder-only Prefill;
     // chunk 1 has 129 tokens and runs TerminalPrefill(256) with a fresh SWA replay boundary.
     let mut s = engine_with_terminal_prefill(&[256, 512]);
+    without_optional_captures(&mut s);
     let handle = add(&mut s, 3, 641, 4);
     assert_eq!(
         run_prefill_sequence(&mut s, handle),
@@ -4546,6 +4563,7 @@ fn terminal_prefill_rejects_invalid_capacities_and_post_admission_registration()
 #[test]
 fn terminal_prefill_rebases_service_price_when_rate_drops_from_intermediate_prefill() {
     let mut s = engine_with_terminal_prefill(&[256, 512]);
+    without_optional_captures(&mut s);
     set_cost(&mut s, GraphKind::Decode, 1, 1, 10 * MS);
     set_cost(&mut s, GraphKind::Prefill, 1, 128, 8 * MS);
     set_cost(&mut s, GraphKind::Prefill, 1, 256, 8 * MS);
@@ -4727,6 +4745,7 @@ fn mixed_graphs_excluded_for_deferred_prefill_and_prompt_logprobs() {
         input_bindings: vec![],
     });
     s.measured_graph_durations(&graphs).unwrap();
+    without_optional_captures(&mut s);
 
     // 1. prompt_logprobs requests exclude fast Mixed durations (1 ms) and price only ScoredPrefill (20 ms).
     let scored = s
@@ -5557,8 +5576,13 @@ fn cold_deepseek_16k_prefill_uses_natural_fit_discovery() {
         ("124K", 126_976, 8, 2, 12_288),
         ("124000", 124_000, 8, 2, 10_240),
     ];
+    let engine = |with_terminal| {
+        let mut s = cold_deepseek_16k_engine(with_terminal);
+        without_optional_captures(&mut s);
+        s
+    };
     for (label, prompt, expected_launches, expected_req1_disc, expected_tail_cap) in cases {
-        let mut s = cold_deepseek_16k_engine(true);
+        let mut s = engine(true);
         for req in 1..=3u32 {
             let m = run_cold_request_metrics(&mut s, req, prompt);
             let ms = m.prefill_ns as f64 / 1e6;
@@ -5607,7 +5631,7 @@ fn cold_deepseek_16k_prefill_uses_natural_fit_discovery() {
     }
 
     // Without TerminalPrefill catalog, a cold 124K prompt also runs 7x Prefill(16384) + Prefill(12288).
-    let mut no_term = cold_deepseek_16k_engine(false);
+    let mut no_term = engine(false);
     let r1 = run_cold_request_metrics(&mut no_term, 1, 126_976);
     assert_eq!((r1.launches, r1.prefill_discoveries), (8, 2));
     assert_eq!(

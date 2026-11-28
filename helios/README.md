@@ -373,10 +373,12 @@ tokens. Checkpoint selection prioritizes the last eligible message boundary,
 using the prompt end when no message boundary is eligible. Earlier messages and
 a distinct prompt end compete within a work allowance of
 `scheduler_checkpoint_extra_work_fraction` times estimated uncached prefill work,
-defaulting to 0.05. Extra captures charge snapshot-copy cost and additional prefill
-caused by splitting chunks. Productive completed decode earns the same fraction
-of measured time for a distinct terminal capture. Unknown costs exclude extras
-while preserving best-effort anchor retention. There is no capture-count cap or
+defaulting to 0.05. Aligned positions inside a final message longer than one
+prefill chunk compete last for what remains, so a prefix shared within one
+message can be reused. Extra captures charge snapshot-copy cost and additional
+prefill caused by splitting chunks. Productive completed decode earns the same
+fraction of measured time for a distinct terminal capture. Unknown costs exclude
+extras while preserving best-effort anchor retention. There is no capture-count cap or
 per-request share of snapshot rows. The global allocator accounts for snapshot
 aliases, guards a later anchor against earlier optional captures, and reclaims
 unused guards for mandatory execution. Only obtainable capture destinations
@@ -486,9 +488,9 @@ scheduled when the core supplies them; Ignition captures them only with
 `--mixed-prefill`. See
 [the native scheduling design](../docs/scheduling-runtime-design.md#policy-preferences).
 
-Admission reserves checkpoints for the selected message boundaries, the prompt
-end, and the terminal endpoint beyond the reused prefix.
-Prefill stops at each selected message boundary and at the prompt end. Snapshot graphs
+Admission reserves checkpoints for the selected message boundaries, aligned
+positions, the prompt end, and the terminal endpoint beyond the reused prefix.
+Prefill stops at each selected cut and at the prompt end. Snapshot graphs
 copy live state and partial cache tails to immutable snapshot rows after the
 selected requests' model submissions complete. Message and prompt publication retain the live physical
 page sequence while transferring complete pages to the cache. Admission reuse

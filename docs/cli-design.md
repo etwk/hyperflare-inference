@@ -702,9 +702,9 @@ work relative to productive request work. The default is `0.05`; values must be
 finite and in `[0,1]`. It overrides
 `[server] scheduler_checkpoint_extra_work_fraction`. The scheduler always considers
 the last eligible message endpoint as a best-effort conversation anchor, even
-when timing estimates are unavailable or the fraction is zero. Earlier messages
-and a distinct prompt end consume the fraction of estimated uncached prefill
-work; a distinct terminal endpoint earns its allowance from completed productive
+when timing estimates are unavailable or the fraction is zero. Earlier messages,
+a distinct prompt end, and then aligned positions inside a final message longer
+than one prefill chunk consume the fraction of estimated uncached prefill work; a distinct terminal endpoint earns its allowance from completed productive
 decode. Extra work includes snapshot copies and additional prefill caused by
 splitting chunks. Snapshot storage remains globally shared and reclaimable for
 mandatory execution. This option requires no core re-export.
