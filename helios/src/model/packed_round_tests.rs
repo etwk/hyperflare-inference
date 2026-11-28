@@ -97,13 +97,17 @@ fn packed_combined_budget_keeps_width_one_batches_without_a_useful_packed_shape(
     partial.graphs.push(graph);
     catalog::validate(&partial_config, &partial).unwrap();
     Inputs::new(&partial_config, &partial).unwrap();
-    for (kind, batch) in [(GraphKind::Speculative, 2), (GraphKind::Speculative, 4)] {
+    // Validation requires width-one graphs, and wider graphs while a wider round fits the row
+    // budget. Coverage of each declared batch belongs to core selection.
+    for (omit_width_one, rule) in [(true, "width-one speculative graph"), (false, "wider speculative graph")] {
         let mut invalid = value.clone();
-        let omitted = invalid.graphs.iter().find(|g| g.kind == kind && g.batch_capacity == batch).unwrap().name.clone();
-        invalid.graphs.retain(|g| g.name != omitted);
+        invalid.graphs.retain(|g| g.kind != GraphKind::Speculative || (g.token_capacity == 1) != omit_width_one);
+        let names: std::collections::HashSet<_> = invalid.graphs.iter().map(|g| g.name.clone()).collect();
         let mut invalid_config = config.clone();
-        invalid_config.contract.graphs.retain(|g| g.graph != omitted);
-        assert!(catalog::validate(&invalid_config, &invalid).is_err(), "missing {kind:?} batch {batch}");
+        invalid_config.contract.graphs.retain(|g| names.contains(&g.graph));
+        let error = catalog::validate(&invalid_config, &invalid)
+            .expect_err(&format!("catalog without a {rule} validated")).to_string();
+        assert!(error.contains(rule), "{error}");
     }
 }
 
