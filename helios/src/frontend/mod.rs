@@ -845,7 +845,7 @@ impl Frontend {
             return candidates
                 .iter()
                 .copied()
-                .find(|level| matches!(*level, "low" | "high" | "xhigh" | "max"))
+                .find(|level| deepseek::named_effort(level).is_some())
                 .ok_or_else(|| deepseek::invalid("unsupported reasoning effort"));
         }
         let accepted = self.effort_levels.get_or_init(|| {

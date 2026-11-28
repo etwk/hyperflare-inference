@@ -698,10 +698,17 @@ data. Reuse does not increase image, context, or HTTP body limits.
 Anthropic histories accept inline system text and preserve text, thinking, tool
 use/results, errors, and image blocks. Message-level control metadata, including
 `output_config.effort`, is ignored; top-level generation controls apply to the
-request. Empty system messages produce no prompt text. Assistant-prefill messages
-use the prepared template's continuation support. `context_management` may
-request preservation of all thinking blocks
-(`clear_thinking_20251015` with `keep: "all"`); active context edits are rejected.
+request. Empty system messages produce no prompt text. Every other message must
+have content: absent content, `""`, `[]`, or only empty text blocks return HTTP
+400, except in the final assistant message, which is an assistant prefill.
+Assistant-prefill messages use the prepared template's continuation support. A
+`tool_reference` block inside a `tool_result` reads as the name of the tool it
+references, which must be declared in `tools` (HTTP 400 otherwise);
+`defer_loading` is not implemented, and every declared tool appears in the
+prompt. A `redacted_thinking` block is accepted and omitted from the prompt,
+because its payload cannot be read. `context_management` may request preservation
+of all thinking blocks (`clear_thinking_20251015` with `keep: "all"`); active
+context edits are rejected.
 `cache_control` on a user message's `text`, `image`, or `tool_result` block
 marks the end of that block as a candidate prefix-checkpoint boundary, for the
 first four such blocks in a request; `cache_control` elsewhere is ignored. The
@@ -825,11 +832,16 @@ Responses and Anthropic named effort settings
 the same neutral levels. They do not accept numeric scores. The frontend resolves
 those levels against the effort vocabulary accepted by the prepared template: for example Qwen uses
 `low/medium/xhigh`. Native DeepSeek V4 and V4.1 prompt encoders accept
-`low/high/xhigh/max` and default to thinking enabled and high effort.
-DeepSeek V4 rejects numeric effort. DeepSeek V4.1 additionally accepts a JSON
-integer from **1 through 100** in the native `reasoning_effort` option, either
-at the request's top level or in `chat_template_kwargs`. Its named levels map
-to scores `low=50`, `high=75`, `xhigh=75`, and `max=100`.
+`minimal`, `low`, `medium`, `high`, `xhigh`, and `max` and default to thinking
+enabled and high effort; `minimal` renders as `low` and `medium` as `high`.
+On Chat Completions, `reasoning_effort: "none"` disables thinking unless the
+request sets `enable_thinking` or `thinking_mode`; Responses and Messages also
+treat `none` as thinking off. DeepSeek V4 rejects numeric effort. DeepSeek V4.1 additionally
+accepts a JSON integer from **1 through 100** in the native `reasoning_effort`
+option, either at the request's top level or in `chat_template_kwargs`. Its named
+levels map to scores `low=50`, `high=75`, `xhigh=75`, and `max=100` when the
+request names them in that option. Responses and Anthropic requests map `xhigh`
+and `max` to one neutral level, which renders as `max`.
 For `POST /v1/chat/completions`, for example:
 
 ```json

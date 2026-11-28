@@ -48,6 +48,24 @@ fn strip_billing_header(mut content: Prompt) -> Option<Prompt> {
     (!rest.is_empty()).then_some(rest)
 }
 
+/// The named reasoning efforts and the level each renders. `minimal` renders as
+/// `low` and `medium` as `high`, as the official DeepSeek protocol converters do.
+const NAMED_EFFORTS: [(&str, ReasoningEffort); 6] = [
+    ("minimal", ReasoningEffort::Low),
+    ("low", ReasoningEffort::Low),
+    ("medium", ReasoningEffort::High),
+    ("high", ReasoningEffort::High),
+    ("xhigh", ReasoningEffort::Xhigh),
+    ("max", ReasoningEffort::Max),
+];
+
+pub(super) fn named_effort(name: &str) -> Option<ReasoningEffort> {
+    NAMED_EFFORTS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, effort)| *effort)
+}
+
 pub(super) fn invalid(message: impl Into<String>) -> Error {
     Error::frontend(FrontendError::Input(Failure::new(message.into())))
 }
@@ -138,6 +156,16 @@ fn conversation(
             )));
         }
     }
+    let mut request = options.clone();
+    // `none` is no effort level. As on Responses it turns thinking off, unless
+    // the request chose a thinking mode itself.
+    if request.get("reasoning_effort").is_some_and(|v| v == "none") {
+        request.remove("reasoning_effort");
+        if !request.contains_key("enable_thinking") && !request.contains_key("thinking_mode") {
+            request.insert("enable_thinking".into(), false.into());
+        }
+    }
+    let options = &request;
     let mut options = {
         let mut merged = frontend.defaults.clone();
         if options.contains_key("enable_thinking") && !options.contains_key("thinking_mode") {
@@ -212,23 +240,20 @@ fn conversation(
         },
     };
     let effort_error = || {
+        let names = NAMED_EFFORTS.map(|(name, _)| name).join(", ");
         invalid(if frontend.prompt_encoder == PromptEncoder::DeepseekV41 {
-            "reasoning_effort must be an integer from 1 through 100 or low, high, xhigh, or max"
+            format!(
+                "reasoning_effort must be an integer from 1 through 100, none, or one of {names}"
+            )
         } else {
-            "reasoning_effort must be low, high, xhigh, or max for DeepSeek V4"
+            format!("reasoning_effort must be none or one of {names} for DeepSeek V4")
         })
     };
     let (reasoning_effort, reasoning_effort_score) =
         match options.get("reasoning_effort").filter(|v| !v.is_null()) {
             None => (Some(ReasoningEffort::High), None),
             Some(Json::String(value)) => (
-                Some(match value.as_str() {
-                    "low" => ReasoningEffort::Low,
-                    "high" => ReasoningEffort::High,
-                    "xhigh" => ReasoningEffort::Xhigh,
-                    "max" => ReasoningEffort::Max,
-                    _ => return Err(effort_error()),
-                }),
+                Some(named_effort(value).ok_or_else(effort_error)?),
                 None,
             ),
             Some(Json::Number(value)) if frontend.prompt_encoder == PromptEncoder::DeepseekV41 => {
