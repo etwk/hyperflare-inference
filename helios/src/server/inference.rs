@@ -6,7 +6,7 @@
 
 //! Protocol-neutral inputs lowered only at the model frontend boundary.
 
-use crate::{AdmissionError, Error, Result};
+use crate::{AdmissionError, Error, Result, frontend::PromptEncoder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -230,20 +230,27 @@ fn content(parts: &[Part]) -> Result<Value> {
     }
 }
 
-/// Converts semantic parts to the message context consumed by prepared templates.
-/// `failure_text` begins each failed tool result with a text part saying it
-/// failed, for prompt formats that have no tool-error syntax; every result keeps
-/// its `is_error` flag.
+/// Converts semantic parts to the message context the prompt `encoder` renders.
+///
+/// Encoders that place system and developer messages themselves receive them
+/// where they occur. For the others, a request with a developer message gets all
+/// system and developer text in one leading system message, each section
+/// labeled with its role.
+///
+/// Encoders with no tool-error syntax receive each failed tool result with a
+/// leading text part saying it failed; every result keeps its `is_error` flag.
 pub fn template_messages(
     messages: &[Message],
     tool_choice: ToolChoice,
     hints: &[(usize, usize)],
-    failure_text: bool,
+    encoder: PromptEncoder,
 ) -> Result<Vec<Value>> {
+    let failure_text = !encoder.renders_tool_errors();
     let mut out = Vec::new();
-    let lower_instructions = messages
-        .iter()
-        .any(|message| message.role == Role::Developer);
+    let lower_instructions = !encoder.renders_instruction_messages()
+        && messages
+            .iter()
+            .any(|message| message.role == Role::Developer);
     let instructions: Vec<_> = messages
         .iter()
         .filter(|m| lower_instructions && matches!(m.role, Role::System | Role::Developer))
@@ -506,7 +513,7 @@ mod tool_result_order_tests {
     }
 
     fn lower(messages: &[Message]) -> Vec<Value> {
-        template_messages(messages, ToolChoice::Auto, &[], true).unwrap()
+        template_messages(messages, ToolChoice::Auto, &[], PromptEncoder::Jinja).unwrap()
     }
 
     #[test]

@@ -22,6 +22,32 @@ use deepseek_recipe_encoding::{
 
 const IMAGE_SPECIAL_TOKEN: &str = SpecialToken::Image.default_str();
 
+const BILLING_HEADER: &str = "x-anthropic-billing-header";
+
+/// Removes the Anthropic billing header from system text, as the official
+/// DeepSeek Chat Completions converter does. Anthropic clients open their system
+/// prompt with this accounting metadata; left in the prompt, any difference
+/// between two requests' headers changes the first message and with it every
+/// prefix-cache key.
+///
+/// Text that starts with the header keeps what follows from the first newline or
+/// `You are`, whichever comes first, without leading whitespace. Without either,
+/// or when nothing remains, `None` reports that the message vanishes. Other text
+/// is returned unchanged.
+fn strip_billing_header(mut content: Prompt) -> Option<Prompt> {
+    let text = content.as_str();
+    if !text.starts_with(BILLING_HEADER) {
+        return Some(content);
+    }
+    let start = ["\n", "You are"]
+        .iter()
+        .filter_map(|marker| text.find(marker))
+        .min()?;
+    let start = text.len() - text[start..].trim_start().len();
+    let rest = content.split_off(start);
+    (!rest.is_empty()).then_some(rest)
+}
+
 pub(super) fn invalid(message: impl Into<String>) -> Error {
     Error::frontend(FrontendError::Input(Failure::new(message.into())))
 }
@@ -95,9 +121,6 @@ fn conversation(
     messages: &[Json],
     options: &Map<String, Json>,
 ) -> Result<(Conversation, Vec<(String, Vec<usize>)>, Option<u8>)> {
-    if messages.is_empty() {
-        return Err(invalid("cannot encode an empty conversation"));
-    }
     for key in options.keys() {
         if matches!(
             key.as_str(),
@@ -306,11 +329,16 @@ fn conversation(
             return Err(invalid("images require user or tool messages"));
         }
         converted.push(match role {
-            "system" | "developer" => InputMessage::System {
-                content: prompt,
-                image_sources,
-                tools: None,
-            },
+            "system" | "developer" => {
+                let Some(content) = strip_billing_header(prompt) else {
+                    continue;
+                };
+                InputMessage::System {
+                    content,
+                    image_sources,
+                    tools: None,
+                }
+            }
             "user" => InputMessage::User {
                 content: prompt,
                 image_sources,
@@ -371,6 +399,9 @@ fn conversation(
             }
             _ => return Err(invalid("unsupported DeepSeek message role")),
         });
+    }
+    if converted.is_empty() {
+        return Err(invalid("cannot encode an empty conversation"));
     }
     Ok((
         Conversation {

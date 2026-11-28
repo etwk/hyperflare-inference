@@ -444,7 +444,7 @@ pub(super) fn template_inputs<'a>(
                     ToolChoice::Auto
                 },
                 &request.checkpoint_hints,
-                !frontend.prompt_encoder().renders_tool_errors(),
+                frontend.prompt_encoder(),
             )?,
             None,
         ),

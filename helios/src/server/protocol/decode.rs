@@ -890,6 +890,7 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frontend::PromptEncoder;
     fn string_stops(value: Option<&Value>) -> Result<Vec<String>> {
         let decoded = decode(
             Protocol::Chat,
@@ -901,7 +902,8 @@ mod tests {
     }
     fn normalize_tool_arguments(message: &mut Value) -> Result<()> {
         let decoded = chat_messages(&json!({"messages":[message]}))?;
-        *message = template_messages(&decoded, ToolChoice::Auto, &[], true)?.remove(0);
+        *message =
+            template_messages(&decoded, ToolChoice::Auto, &[], PromptEncoder::Jinja)?.remove(0);
         Ok(())
     }
     #[test]
@@ -1356,7 +1358,7 @@ mod native_prompt_tests {
             let render = |hints: &[(usize, usize)]| {
                 frontend
                     .render_chat(
-                        &template_messages(messages, ToolChoice::Auto, hints, true).unwrap(),
+                        &template_messages(messages, ToolChoice::Auto, hints, encoder).unwrap(),
                         &serde_json::Map::new(),
                     )
                     .unwrap()
@@ -1953,5 +1955,279 @@ mod native_prompt_tests {
                 crate::output::tagged::OutputStart::Reasoning
             );
         }
+    }
+    /// What one request renders to: its prompt text, token IDs, and the token
+    /// positions where a cached prefix can end.
+    struct Rendered {
+        text: String,
+        tokens: Vec<u32>,
+        boundaries: Vec<usize>,
+    }
+
+    fn render_native(
+        native: &(Frontend, GrammarCompiler, crate::model::ModelConfig),
+        protocol: Protocol,
+        body: Value,
+    ) -> Rendered {
+        let (frontend, compiler, config) = native;
+        let decoded = decode(protocol, body, false).unwrap();
+        let prepared = crate::server::request::prepare_inference(
+            frontend,
+            None,
+            compiler,
+            config,
+            &decoded.request,
+            0,
+            false,
+        )
+        .unwrap();
+        Rendered {
+            text: prepared.rendered_prompt,
+            tokens: prepared.prompt.tokens,
+            boundaries: prepared.prompt.message_boundaries,
+        }
+    }
+
+    /// The prompt that DeepSeek's official protocol converter and V4.1 encoder
+    /// produce for the same request body.
+    fn reference_prompt(protocol: Protocol, mut body: Value) -> String {
+        use deepseek_recipe::{
+            anthropic::MessagesRequest,
+            openai::{ChatCompletionRequest, ResponsesRequest},
+            request::{ConversionOptions, ProtocolRequest},
+        };
+        use deepseek_recipe_encoding::{PromptEncoding, dsv41::DeepseekV41Encoding};
+        body["model"] = json!("DeepSeek-V4.1-Flash");
+        let options = ConversionOptions::default();
+        let request = match protocol {
+            Protocol::Chat => serde_json::from_value::<ChatCompletionRequest>(body)
+                .unwrap()
+                .convert(options),
+            Protocol::Messages => serde_json::from_value::<MessagesRequest>(body)
+                .unwrap()
+                .convert(options),
+            Protocol::Responses => serde_json::from_value::<ResponsesRequest>(body)
+                .unwrap()
+                .convert(options),
+            Protocol::Completions => unreachable!(),
+        }
+        .unwrap();
+        DeepseekV41Encoding::new()
+            .render_conversation(&request.conversation)
+            .prompt
+    }
+
+    fn common_prefix(left: &[u32], right: &[u32]) -> usize {
+        left.iter().zip(right).take_while(|(a, b)| a == b).count()
+    }
+
+    #[test]
+    fn a_mid_conversation_developer_message_keeps_the_prefix_before_it() {
+        let native = native(PromptEncoder::DeepseekV41);
+        let history = |tail: Value| {
+            let mut input = vec![
+                json!({"role":"developer","content":"Repository rules"}),
+                json!({"role":"user","content":"Find it"}),
+                json!({"type":"function_call","call_id":"c","name":"lookup","arguments":"{}"}),
+                json!({"type":"function_call_output","call_id":"c","output":"found"}),
+            ];
+            input.extend(tail.as_array().unwrap().iter().cloned());
+            json!({"input":input,"tools":[{"type":"function","name":"lookup",
+                "parameters":{"type":"object"}}]})
+        };
+        let plain = render_native(
+            &native,
+            Protocol::Responses,
+            history(json!([{"role":"user","content":"Continue"}])),
+        );
+        let inserted = render_native(
+            &native,
+            Protocol::Responses,
+            history(json!([
+                {"role":"developer","content":"Extra rules"},
+                {"role":"user","content":"Continue"}
+            ])),
+        );
+        let through_result = {
+            let end = plain.text.find("</tool_result>").unwrap() + "</tool_result>".len();
+            let ids = native
+                .0
+                .tokenizer()
+                .encode(&plain.text[..end], false)
+                .unwrap();
+            ids.get_ids().len()
+        };
+        // The tool result precedes the inserted message, so everything through it
+        // is cacheable and identical.
+        assert!(
+            plain.boundaries.contains(&through_result),
+            "{:?}",
+            plain.boundaries
+        );
+        assert!(
+            inserted.boundaries.contains(&through_result),
+            "{:?}",
+            inserted.boundaries
+        );
+        assert!(
+            common_prefix(&plain.tokens, &inserted.tokens) >= through_result,
+            "{}\n{}",
+            plain.text,
+            inserted.text
+        );
+        assert!(
+            inserted
+                .text
+                .contains("</tool_result><｜System｜>Extra rules<｜User｜>Continue"),
+            "{}",
+            inserted.text
+        );
+        assert_eq!(
+            inserted.text,
+            reference_prompt(
+                Protocol::Responses,
+                history(json!([
+                    {"role":"developer","content":"Extra rules"},
+                    {"role":"user","content":"Continue"}
+                ]))
+            )
+        );
+    }
+
+    #[test]
+    fn native_deepseek_encoders_render_instruction_roles_without_labels() {
+        for encoder in [PromptEncoder::DeepseekV4, PromptEncoder::DeepseekV41] {
+            let native = native(encoder);
+            let render = |roles: [&str; 2]| {
+                render_native(
+                    &native,
+                    Protocol::Chat,
+                    json!({"messages":[
+                        {"role":roles[0],"content":"Policy"},
+                        {"role":roles[1],"content":"Rules"},
+                        {"role":"user","content":"Hello"}]}),
+                )
+            };
+            let system = render(["system", "system"]);
+            assert!(
+                !system.text.contains("instructions:"),
+                "{encoder:?} {}",
+                system.text
+            );
+            for roles in [
+                ["developer", "system"],
+                ["system", "developer"],
+                ["developer", "developer"],
+            ] {
+                let mixed = render(roles);
+                assert_eq!(mixed.text, system.text, "{encoder:?} {roles:?}");
+                assert_eq!(mixed.tokens, system.tokens, "{encoder:?} {roles:?}");
+            }
+            let single = |role: &str| {
+                render_native(
+                    &native,
+                    Protocol::Chat,
+                    json!({"messages":[{"role":role,"content":"Policy"},
+                        {"role":"user","content":"Hello"}]}),
+                )
+            };
+            assert_eq!(
+                single("developer").tokens,
+                single("system").tokens,
+                "{encoder:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn billing_header_is_removed_from_system_text_as_the_official_converter_does() {
+        let native = native(PromptEncoder::DeepseekV41);
+        let chat = |system: &str| {
+            json!({"messages":[{"role":"system","content":system},
+                {"role":"user","content":"Hello"}]})
+        };
+        let without_system = json!({"messages":[{"role":"user","content":"Hello"}]});
+        for (system, kept) in [
+            (
+                "x-anthropic-billing-header: cch=1\nYou are Claude Code.",
+                Some("You are Claude Code."),
+            ),
+            (
+                "x-anthropic-billing-header: a\n  You are b",
+                Some("You are b"),
+            ),
+            (
+                "x-anthropic-billing-header: aYou are b\nc",
+                Some("You are b\nc"),
+            ),
+            (
+                "x-anthropic-billing-header: a\n\nOther rules",
+                Some("Other rules"),
+            ),
+            ("x-anthropic-billing-header: a", None),
+            (
+                "Header follows: x-anthropic-billing-header: a\nb",
+                Some("Header follows: x-anthropic-billing-header: a\nb"),
+            ),
+        ] {
+            let flare = render_native(&native, Protocol::Chat, chat(system));
+            let expected = match kept {
+                Some(text) => render_native(&native, Protocol::Chat, chat(text)),
+                None => render_native(&native, Protocol::Chat, without_system.clone()),
+            };
+            assert_eq!(flare.text, expected.text, "{system:?}");
+            assert_eq!(flare.tokens, expected.tokens, "{system:?}");
+            assert_eq!(
+                flare.text,
+                reference_prompt(Protocol::Chat, chat(system)),
+                "{system:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_system_blocks_render_without_the_billing_header() {
+        let native = native(PromptEncoder::DeepseekV41);
+        let body = |header: Option<&str>| {
+            let mut system = vec![
+                json!({"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}),
+                json!({"type":"text","text":"Follow the repository rules."}),
+            ];
+            if let Some(header) = header {
+                system.insert(0, json!({"type":"text","text":header}));
+            }
+            json!({"max_tokens":16,"system":system,
+                "messages":[{"role":"user","content":"Hello"}]})
+        };
+        let first =
+            "x-anthropic-billing-header: cc_version=2.1.1.a1b; cc_entrypoint=cli; cch=00000;";
+        let second =
+            "x-anthropic-billing-header: cc_version=2.1.1.c9d; cc_entrypoint=cli; cch=7f3e1;";
+        let control = render_native(&native, Protocol::Messages, body(None));
+        for header in [first, second] {
+            let rendered = render_native(&native, Protocol::Messages, body(Some(header)));
+            assert_eq!(rendered.text, control.text);
+            assert_eq!(rendered.tokens, control.tokens);
+            assert_eq!(rendered.boundaries, control.boundaries);
+            assert_eq!(
+                rendered.text,
+                reference_prompt(Protocol::Messages, body(Some(header)))
+            );
+        }
+        assert!(!control.text.contains("billing"));
+    }
+
+    #[test]
+    fn a_conversation_left_with_no_message_after_header_removal_is_rejected() {
+        let (frontend, ..) = native(PromptEncoder::DeepseekV41);
+        let error = frontend
+            .render_chat(
+                &[json!({"role":"system","content":"x-anthropic-billing-header: a"})],
+                &Default::default(),
+            )
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("empty conversation"), "{error}");
     }
 }

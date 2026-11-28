@@ -6,6 +6,8 @@
 
 #![cfg(all(feature = "server", feature = "runtime-core"))]
 
+#[path = "support/instruction_prefix.rs"]
+mod instruction_prefix;
 #[path = "support/native_prefix.rs"]
 mod native_prefix;
 
@@ -241,6 +243,12 @@ fn native_encoders_checkpoint_each_message_prefix() {
             }
         }
     }
+}
+
+#[test]
+fn developer_messages_and_billing_headers_keep_native_prompt_prefixes() {
+    let fixture = Fixture::new(PromptEncoder::DeepseekV41);
+    instruction_prefix::check(&fixture.frontend, |body| fixture.prepare(body).unwrap());
 }
 
 #[test]
