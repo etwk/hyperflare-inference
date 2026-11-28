@@ -1292,6 +1292,42 @@ def test_retained_refresh_preserves_native_fresh_and_expired_ema_updates():
     assert s.credit_ms == 0
 
 
+@pytest.mark.parametrize("rule,expected", [("replace", 2), ("join", 7.25)])
+def test_retained_refresh_ordinary_observation_after_expiry_replaces_or_joins_the_mean(rule, expected):
+    s = scheduler("retained-refresh", expired_ordinary=rule)
+    seed(s, "large", 8)
+    seed(s, "large", 16, end=1)
+    seed(s, "large", 1, end=30_000)
+    assert s._means(30_000)["large"] == s._means(60_000)["large"] == 8
+    seed(s, "large", 2, end=60_000)
+    assert s._means(60_000)["large"] == expected
+
+
+@pytest.mark.parametrize("rule", ["replace", "join"])
+def test_retained_refresh_stale_refresh_probe_restarts_the_mean(rule):
+    s = scheduler("retained-refresh", expired_ordinary=rule)
+    seed(s, "large", 10)
+    seed(s, "small", 1000)
+    s.credit_ms = 5
+    decision = s.choose([view()], 30_000)
+    assert decision.category == "probe" and decision.reason == "stale_refresh"
+    assert decision.action.graph.name == "small"
+    now = finish(s, decision, 200)
+    assert s._means(now)["small"] == 200
+    assert s._observed_at["small"] == now
+
+
+@pytest.mark.parametrize("policy", ["ttl", "ema", "thompson"])
+def test_expired_ordinary_join_belongs_to_retained_refresh(policy):
+    with pytest.raises(ValueError, match="after expiry"):
+        PolicyConfig(policy=policy, funded=False, expired_ordinary="join")
+
+
+def test_expired_ordinary_rule_is_one_of_replace_or_join():
+    with pytest.raises(ValueError, match="after expiry"):
+        PolicyConfig(policy="retained-refresh", expired_ordinary="average")
+
+
 def test_retained_refresh_intrinsic_native_discovery_matches_ttl_startup_actions():
     ttl, retained = scheduler("ttl"), scheduler("retained-refresh")
     now = 0

@@ -1134,12 +1134,13 @@ impl RequestScheduler {
         self.costs.get(step)
     }
 
+    /// Records an ordinary replay of `step` in its duration estimate.
     pub fn observe_execution(
         &mut self,
         step: &ScheduledStep,
         timing: crate::execution::ExecutionTiming,
     ) {
-        self.costs.observe(step, timing);
+        self.costs.observe(step, timing, false);
     }
 
     pub fn submitted_timing(&self, fence: Fence) -> Result<SubmittedTiming> {
@@ -2684,7 +2685,7 @@ impl RequestScheduler {
         self.refresh.validate_completion(step.origin, timing)?;
         let submission = self.submissions.remove(&fence).unwrap();
         self.refresh.complete(submission.origin, timing);
-        self.observe_execution(&submission.step, timing);
+        self.costs.observe(&submission.step, timing, matches!(submission.origin, PlanOrigin::RefreshStart(_)));
         let step = submission.step;
         let now_ns = self.now_ns;
         let proposal_source = self.proposal_source;

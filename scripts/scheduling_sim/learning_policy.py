@@ -44,6 +44,7 @@ class PolicyConfig:
     initial_discovery: str = "productive"
     mean_estimator: str = "arithmetic"
     partial_blocks: bool = False
+    expired_ordinary: str = "replace"
 
     def __post_init__(self):
         if self.policy not in POLICIES or self.estimator not in ("cumulative", "regime", "log-regime"):
@@ -79,6 +80,10 @@ class PolicyConfig:
             raise ValueError("operational mean must be arithmetic or ema")
         if type(self.partial_blocks) is not bool:
             raise ValueError("partial timing blocks must be a boolean")
+        if self.expired_ordinary not in ("replace", "join"):
+            raise ValueError("an ordinary observation after expiry must replace or join the operational mean")
+        if self.expired_ordinary == "join" and self.policy != "retained-refresh":
+            raise ValueError("only retained-refresh defines how an ordinary observation after expiry updates its mean")
         if self.policy == "retained-refresh" and (not self.funded or self.estimator != "cumulative"):
             raise ValueError("retained-refresh requires funding and the cumulative timing estimator")
         if self.policy == "retained-refresh" and (self.probe_harm_ms is not None or self.harm_alpha is not None):
@@ -577,7 +582,7 @@ class LearningScheduler:
         self._planned = None
         self._plan_signature = None
 
-    def _observe(self, observation: TimingObservation):
+    def _observe(self, observation: TimingObservation, probe=False):
         if not observation.valid:
             self.invalid_observations += 1
             return
@@ -589,8 +594,10 @@ class LearningScheduler:
                                    if self.config.policy != "known" else {g.name: None for g in self.catalog}, None)
         self.estimates[name].observe(total, gpu_ms=observation.gpu_ms, handoff_ms=observation.handoff_ms)
         fresh = observation.end_ms < self._expires.get(name, float("-inf"))
-        self._ema[name] = ((7 * self._ema[name] + total) / 8
-                           if name in self._ema and (self.config.policy == "ema" or fresh) else total)
+        # A probe re-measures an expired graph on purpose, so it restarts the mean; with
+        # expired_ordinary="join", an ordinary replay of an expired graph joins it instead.
+        joins = fresh or self.config.policy == "ema" or (self.config.expired_ordinary == "join" and not probe)
+        self._ema[name] = (7 * self._ema[name] + total) / 8 if name in self._ema and joins else total
         self._observed_at[name] = observation.end_ms
         lifetime = (self._expiry_rng.uniform(0.8, 1.2) * self.config.ttl_ms
                     if self.config.policy == "jitter" else self.config.ttl_ms)
@@ -621,7 +628,7 @@ class LearningScheduler:
             if not 0 <= row.get("prefill", 0) <= lane.prefill or not 0 <= row.get("emitted", 0) <= output_limit:
                 raise ValueError("completion progress exceeds its submitted lane")
         self.utility.observe(observation.elapsed_ms, committed)
-        self._observe(observation)
+        self._observe(observation, probe=decision.category == "probe")
         duration = observation.elapsed_ms
         if self.config.policy == "targeted" and self.config.harm_alpha is not None:
             if decision.category == "probe":

@@ -43,6 +43,7 @@ pub(super) fn measured_costs(graphs: &[crate::execution::GraphDescriptor]) -> co
                 ],
                 ..Default::default()
             },
+            false,
         );
     }
     costs
@@ -2329,12 +2330,12 @@ fn readiness_correction_changes_shape_cost_without_changing_service_time() {
     gpu_ns[1] = Some(9_000);
     let mut timing = ExecutionTiming { gpu_ns, readiness: Some(ReadinessIntervals::decode(&timestamps).unwrap()),
         wall_ns: 12_000, queued: false };
-    costs.observe(&step, timing);
+    costs.observe(&step, timing, false);
     assert_eq!(costs.get(&step), Some(8_000));
     assert_eq!(cost::observed_duration_ns(timing), Some(12_000));
     timing.queued = true;
     timing.wall_ns = 100_000;
-    costs.observe(&step, timing);
+    costs.observe(&step, timing, false);
     assert_eq!(costs.get(&step), Some(8_000));
     assert_eq!(cost::observed_duration_ns(timing), Some(10_000));
     assert_eq!(timing.gpu_ns[0], Some(10_000));
