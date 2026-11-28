@@ -400,9 +400,12 @@ The first positive device observation sets the estimate. Each further valid
 sample enters the median of the last nine replay observations, averaging the
 middle pair when fewer than nine samples give an even count. An entry becomes stale after 30 seconds
 without a valid observation. Its measured cost remains available for selection
-and service-rate normalization, and its next observation joins the same window,
-so the first replay after idle moves the estimate only as far as the median
-does. Elapsed time alone never makes a measured graph unknown. When multiple
+and service-rate normalization. A funded refresh probe of a stale entry restarts
+its window, so one probe learns a cost that changed while the graph went unused.
+Any other observation of a stale entry joins the window: refresh credit resets
+at idle, so the first replays after idle are ordinary, and they move the estimate
+only as far as the median does. Elapsed time alone never makes a measured graph
+unknown. When multiple
 packed speculative shapes cover a `(batch, width)` lookup
 for service-rate normalization or continuation pricing, Helios takes the minimum
 positive measured duration across matching shapes and returns zero only when

@@ -752,6 +752,41 @@ fn funded_stale_graph_recheck_recovers_a_poisoned_observation() {
     assert_eq!(s.estimated_duration_ns(&retry), Some(2 * MS));
 }
 
+/// A funded refresh restarts its stale target's window: one probe recovers a cost that a run
+/// of slow replays had set, where joining the window would leave the median on them.
+#[test]
+fn funded_refresh_restarts_a_stale_window() {
+    let mut s = engine(1, true);
+    let h = add(&mut s, 1, 1, 64);
+    ready(&mut s, &[h]);
+    let mut graphs = super::tests::duration_graphs(1);
+    for graph in &mut graphs {
+        graph.estimated_duration_ns = if graph.token_capacity == 8 { 2 * MS } else { 4 * MS };
+    }
+    s.costs = super::tests::measured_costs(&graphs);
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.token_capacity, 8);
+    for _ in 0..5 {
+        s.observe_execution(&plan, gpu_time(1_000 * MS));
+    }
+    assert_eq!(s.estimated_duration_ns(&plan), Some(1_000 * MS));
+    let ttl = s.policy.estimate_ttl_ns;
+    s.advance_to(ttl / 2).unwrap();
+    for width in [1, 2, 4] {
+        let mut other = (*plan).clone();
+        other.token_capacity = width;
+        other.draft_tokens = width - 1;
+        other.packed_token_capacity = other.batch_capacity * width;
+        s.observe_execution(&other, gpu_time(4 * MS));
+    }
+    s.advance_to(ttl).unwrap();
+    s.refresh.credit_ns = refresh::CREDIT_CAP_NS;
+    let retry = measured_step(&mut s, 2 * MS, 7);
+    assert!(matches!(retry.origin, PlanOrigin::RefreshStart(_)));
+    assert_eq!(retry.token_capacity, 8);
+    assert_eq!(s.estimated_duration_ns(&retry), Some(2 * MS));
+}
+
 #[test]
 fn neglected_stale_shapes_require_funding_while_the_winner_stays_fresh() {
     let mut s = cold_engine(1, true);

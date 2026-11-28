@@ -707,9 +707,11 @@ funded remeasurement of stale graphs. Its cost estimate is an exponential mean,
 whereas Helios uses the median of its last nine replay observations
 (`helios/src/scheduler/cost.rs`). A measured cost
 remains available after its 30-second lifetime. Fresh observations update its
-exponential mean with weight 1/8; the first valid observation after expiry
-replaces that mean. Expiry alone changes neither the measured value nor its
-availability.
+exponential mean with weight 1/8, and a refresh probe of an expired graph
+replaces that mean. `expired_ordinary` selects what an ordinary observation of
+an expired graph does: `replace`, the default and the configuration qualified
+below, or `join`, Helios's rule, which updates the mean with weight 1/8. Expiry
+alone changes neither the measured value nor its availability.
 
 When the foreground allowance reaches its cap, `retained-refresh` remeasures a
 feasible stale physical graph other than the ordinary incumbent. It orders

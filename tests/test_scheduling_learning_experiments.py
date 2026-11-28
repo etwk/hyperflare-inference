@@ -707,6 +707,21 @@ def test_retained_refresh_cli_exposes_only_supported_funding():
     assert {item.config.funded for item in all_policies if item.config.policy == "thompson"} == {False, True}
 
 
+def test_expired_ordinary_variant_has_its_own_configuration_id_and_loads_from_json(tmp_path):
+    from dataclasses import replace
+    from scripts.scheduling_sim.learning import configuration_id, load_configurations
+    from scripts.scheduling_sim.learning_policy import PolicyConfig
+
+    current = PolicyConfig(policy="retained-refresh", alpha=.002)
+    variant = replace(current, expired_ordinary="join")
+    assert configuration_id(current) == "retained-refresh:funded:cumulative:alpha=0.002"
+    assert configuration_id(variant) == configuration_id(current) + ":expired_ordinary=join"
+    path = tmp_path / "configurations.json"
+    path.write_text(json.dumps([{"id": configuration_id(config), "config": asdict(config)}
+                                for config in (current, variant)]))
+    assert [item.config for item in load_configurations(path, PolicyConfig)] == [current, variant]
+
+
 @pytest.mark.parametrize("options", [("--estimator", "regime"), ("--estimator", "log-regime"),
                                      ("--funding", "unfunded")])
 def test_all_policies_omit_incompatible_retained_refresh_and_explicit_selection_rejects(options):
