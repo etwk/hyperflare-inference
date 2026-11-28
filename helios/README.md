@@ -495,6 +495,14 @@ copy live state and partial cache tails to immutable snapshot rows after the
 selected requests' model submissions complete. Message and prompt publication retain the live physical
 page sequence while transferring complete pages to the cache. Admission reuse
 counts stay fixed. Duplicate publication never remaps the live request.
+A pending request waits while a running request still consuming its prompt will
+capture a checkpoint inside the prefix they share, at least one prefill chunk past
+what the GPU cache held when the pending request was planned. It is admitted once
+that capture is published, or once the running request ends or no longer plans
+it, and restores the checkpoint instead of prefilling the same tokens beside it.
+Prefill graphs run one request at a time, so prefilling the shared tokens beside
+the running request would not finish them sooner. Pending requests behind it in
+the queue are admitted meanwhile.
 
 `finish` publishes exact terminal consumed state after its successful snapshot
 copy, excluding the final pending sampled token. Terminal retirement competes by

@@ -208,6 +208,10 @@ struct Incoming {
     /// Replaced on readmission and counted once when this request ends.
     host_lookup_outcome: Option<crate::offload::LookupOutcome>,
     pool_plan: Option<crate::scheduler::AdmissionPlan>,
+    /// The plan a queued request is held on while a running request prefills a prefix they
+    /// share, kept so its prompt is hashed once rather than on every admission pass. Unused
+    /// when `pool_plan` holds one.
+    shared_plan: Option<crate::scheduler::AdmissionPlan>,
     restore_wait: RestoreWait,
 }
 
@@ -915,6 +919,7 @@ impl ModelRuntime {
                 pool_lookup_started: None,
                 host_lookup_outcome: None,
                 pool_plan: None,
+                shared_plan: None,
                 restore_wait: RestoreWait::default(),
             };
             let enqueue_ns = observation
@@ -1370,6 +1375,15 @@ impl<'a> Worker<'a> {
                 incoming.poll_pool_lookup();
                 incoming.poll_restore_wait(now);
             }
+            for incoming in self.pending.iter_mut() {
+                if incoming.pool_plan.is_none()
+                    && incoming.shared_plan.is_none()
+                    && incoming.prompt_scored >= incoming.prompt_score_end
+                {
+                    // An invalid request has no plan and is rejected when admitted.
+                    incoming.shared_plan = self.scheduler.plan_admission(&incoming.spec()).ok();
+                }
+            }
             // Full scheduler stats would scan every cached checkpoint on each pass.
             let resources = (
                 self.scheduler.completed(),
@@ -1391,7 +1405,15 @@ impl<'a> Worker<'a> {
                     (incoming, Some(parked), index)
                 }
                 None => {
-                    let Some(index) = self.pending.iter().position(eligible) else {
+                    let scheduler = &self.scheduler;
+                    let Some(index) = self.pending.iter().position(|incoming| {
+                        eligible(incoming)
+                            && !incoming
+                                .pool_plan
+                                .as_ref()
+                                .or(incoming.shared_plan.as_ref())
+                                .is_some_and(|plan| scheduler.awaits_shared_prefill(plan))
+                    }) else {
                         break;
                     };
                     (self.pending.remove(index).unwrap(), None, index)
@@ -1433,7 +1455,7 @@ impl<'a> Worker<'a> {
                     store.as_mut(),
                     incoming.pool_lookup.as_ref(),
                     spec,
-                    incoming.pool_plan.as_ref(),
+                    incoming.pool_plan.as_ref().or(incoming.shared_plan.as_ref()),
                     checkpoint_accounting,
                     self.prefill_rate,
                     self.metrics,
@@ -1446,7 +1468,12 @@ impl<'a> Worker<'a> {
                     handle
                 })
             } else {
-                admit_with_checkpoint_accounting(&mut self.scheduler, spec, checkpoint_accounting)
+                admit_with_checkpoint_accounting(
+                    &mut self.scheduler,
+                    spec,
+                    incoming.shared_plan.as_ref(),
+                    checkpoint_accounting,
+                )
             };
             let handle = match admission {
                 Ok(handle) => handle,
@@ -1555,6 +1582,7 @@ impl<'a> Worker<'a> {
                 incoming.pool_lookup = None;
                 incoming.pool_plan = None;
             }
+            incoming.shared_plan = None;
             incoming.restore_wait = RestoreWait::default();
             incoming.notify_admission(Ok(()));
             self.active[slot] = Some(Active {
@@ -2739,9 +2767,13 @@ fn begin_pool_lookup(
 fn admit_with_checkpoint_accounting(
     scheduler: &mut RequestScheduler,
     spec: RequestSpec,
+    queued_plan: Option<&crate::scheduler::AdmissionPlan>,
     accounting: Option<crate::scheduler::CheckpointAccounting>,
 ) -> Result<RequestHandle> {
-    let plan = scheduler.plan_admission(&spec)?;
+    let plan = match queued_plan {
+        Some(plan) => scheduler.refresh_admission_plan(plan)?,
+        None => scheduler.plan_admission(&spec)?,
+    };
     Ok(scheduler.admit_planned_with_checkpoint_accounting(spec, plan, None, accounting)?.handle)
 }
 
@@ -2808,7 +2840,7 @@ fn admit_with_host_store(
                     return Err(Error::Admission(AdmissionError::Capacity(failure)));
                 }
                 restore_wait.retry_at = None;
-                let handle = admit_with_checkpoint_accounting(scheduler, spec, accounting.clone())?;
+                let handle = admit_with_checkpoint_accounting(scheduler, spec, queued_plan, accounting.clone())?;
                 scheduler.record_host_lookup();
                 return Ok((handle, Some(LookupOutcome::CapacityRejected)));
             }
@@ -2824,7 +2856,7 @@ fn admit_with_host_store(
             // No event follows a rejected fetch; this request is the ticket's only
             // waiter, so retire it and admit the request again without the store.
             scheduler.finish_inbound(key, false)?;
-            return admit_with_checkpoint_accounting(scheduler, spec, Some(admitted_accounting))
+            return admit_with_checkpoint_accounting(scheduler, spec, queued_plan, Some(admitted_accounting))
                 .map(|handle| (handle, Some(LookupOutcome::EnqueueRejected)));
         }
         Ok((admitted.handle, Some(LookupOutcome::Admitted)))
@@ -3231,6 +3263,7 @@ mod tests {
             pool_lookup_started: None,
             host_lookup_outcome: None,
             pool_plan: None,
+            shared_plan: None,
             restore_wait: RestoreWait::default(),
         };
         (

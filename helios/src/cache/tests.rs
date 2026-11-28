@@ -1280,3 +1280,38 @@ fn equal_epoch_victims_use_role_and_preserve_direct_pins() {
     assert_eq!(cache.evict(EvictionTarget { pages: 0, snapshots: 1 }).retired[0].checkpoint, anchor);
     assert!(cache.evict(EvictionTarget { pages: 0, snapshots: 1 }).retired.is_empty());
 }
+
+#[test]
+fn shared_prefix_is_the_longest_prefix_with_equal_keys() {
+    let event = |position, identity| ConditioningEvent { position, identity: [identity; 32] };
+    let build = |tokens: &[u32], events: &[ConditioningEvent], identity: u8| {
+        let mut history = PrefixHistory::new([identity; 32]);
+        history.append(tokens, events).unwrap();
+        history
+    };
+    let base: Vec<u32> = (0..700).collect();
+    let mut cases = Vec::new();
+    for diverge in [0, 1, 63, 64, 65, 127, 128, 300, 699, 700] {
+        let mut other = base.clone();
+        if diverge < other.len() {
+            other[diverge] = 9_999;
+        }
+        cases.push((build(&base, &[], 7), build(&other, &[], 7)));
+        // A shorter history shares its whole length.
+        cases.push((build(&base, &[], 7), build(&base[..diverge], &[], 7)));
+    }
+    // Conditioning that differs only in identity, or only in position, ends agreement before it.
+    cases.push((build(&base, &[event(200, 1)], 7), build(&base, &[event(200, 2)], 7)));
+    cases.push((build(&base, &[event(200, 1)], 7), build(&base, &[event(201, 1)], 7)));
+    // Another model's history shares nothing.
+    cases.push((build(&base, &[], 7), build(&base, &[], 8)));
+    for (left, right) in cases {
+        let shared = left.shared_prefix(&right);
+        assert_eq!(shared, right.shared_prefix(&left));
+        let longest = (0..=left.token_count().min(right.token_count()))
+            .rev()
+            .find(|&n| left.key_at(n) == right.key_at(n))
+            .unwrap_or(0);
+        assert_eq!(shared, longest);
+    }
+}

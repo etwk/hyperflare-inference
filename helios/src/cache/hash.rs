@@ -93,6 +93,40 @@ impl PrefixHistory {
         })
     }
 
+    /// Tokens at the start of both histories under equal prefix keys: the longest prefix a
+    /// checkpoint of either serves to the other.
+    pub fn shared_prefix(&self, other: &Self) -> u64 {
+        if self.boundaries[0] != other.boundaries[0] {
+            return 0;
+        }
+        // Block keys chain, so they agree up to the first block that differs.
+        let (mut equal, mut differs) = (0, self.boundaries.len().min(other.boundaries.len()));
+        while differs - equal > 1 {
+            let middle = (equal + differs) / 2;
+            if self.boundaries[middle] == other.boundaries[middle] {
+                equal = middle;
+            } else {
+                differs = middle;
+            }
+        }
+        // Inside the next block, a key covers its tokens and events, so agreement is a prefix too.
+        let start = self.boundaries[equal].consumed_tokens;
+        let end = self
+            .token_count()
+            .min(other.token_count())
+            .min(start + HASH_BLOCK_TOKENS as u64);
+        let (mut equal, mut differs) = (start, end + 1);
+        while differs - equal > 1 {
+            let middle = (equal + differs) / 2;
+            if self.key_at(middle) == other.key_at(middle) {
+                equal = middle;
+            } else {
+                differs = middle;
+            }
+        }
+        equal
+    }
+
     pub fn aligned_boundaries(&self) -> &[PrefixKey] {
         &self.boundaries[1..]
     }
