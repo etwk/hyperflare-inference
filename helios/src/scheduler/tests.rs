@@ -277,8 +277,9 @@ fn waiting_prefills_do_not_simulate_checkpoint_storage() {
         cache_memory::STORAGE_SIMULATIONS.set(0);
         let plan = scheduler.plan().unwrap();
         let simulations = cache_memory::STORAGE_SIMULATIONS.get();
-        // Two optional-cut quotes and one capture quote each simulate at most twice.
-        assert!(simulations <= 6, "{simulations} storage simulations in one plan");
+        // Five optional-cut quotes (a message, the endpoint, and 512, 768 and 896 inside the
+        // 800-token final message) and one capture quote each simulate at most twice.
+        assert!(simulations <= 12, "{simulations} storage simulations in one plan");
         let mut completions = state_records(&scheduler, &plan, sequence);
         for (row, lane) in plan.lanes.iter().enumerate() {
             if !plan.lane_kind(row).is_prefill() {
@@ -509,18 +510,19 @@ fn prefill_buckets_mask_capacity_and_allocate_only_live_pages() {
             Default::default(),
         )
         .unwrap();
+    capture_aligned_cut(&mut scheduler, 3, 512);
     let step = scheduler.plan().unwrap();
     assert_eq!((step.token_capacity, step.lanes[0].tokens), (128, 17));
-    scheduler.commit(&step, Fence(3)).unwrap();
+    scheduler.commit(&step, Fence(4)).unwrap();
     assert_eq!(scheduler.request(handle).unwrap().pages().count(), 9);
     scheduler
         .complete(
-            Fence(3),
-            &records(handle, 3, 529, 1, 77, 1),
+            Fence(4),
+            &records(handle, 4, 529, 1, 77, 1),
             Default::default(),
         )
         .unwrap();
-    retain_prompt(&mut scheduler, 4);
+    retain_prompt(&mut scheduler, 5);
     assert_eq!(
         scheduler.request(handle).unwrap().phase,
         RequestPhase::Decode
@@ -607,21 +609,22 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
                 Default::default(),
             )
             .unwrap();
+        capture_aligned_cut(&mut scheduler, 3, chunk_size as u64);
         let step = scheduler.plan().unwrap();
         assert_eq!(
             (step.token_capacity, step.lanes[0].tokens),
             (tail_capacity, tail)
         );
         assert_eq!(step.lanes[0].start_position, chunk_size as u64);
-        scheduler.commit(&step, Fence(3)).unwrap();
+        scheduler.commit(&step, Fence(4)).unwrap();
         assert_eq!(
             scheduler.request(handle).unwrap().pages().count(),
             (chunk_size + tail).div_ceil(64)
         );
         scheduler
             .complete(
-                Fence(3),
-                &records(handle, 3, (chunk_size + tail) as i64, 1, 77, 1),
+                Fence(4),
+                &records(handle, 4, (chunk_size + tail) as i64, 1, 77, 1),
                 Default::default(),
             )
             .unwrap();
@@ -1745,6 +1748,17 @@ fn speculative_scheduler(prompt: usize, budget: u32) -> (RequestScheduler, Reque
     retain_prompt(&mut s, 3);
     (s, h)
 }
+/// A prompt longer than one chunk in one message captures where its first chunk ends: a
+/// chunk-aligned cut, which without a terminal prefill catalog splits no chunk.
+fn capture_aligned_cut(s: &mut RequestScheduler, fence: u64, consumed: u64) {
+    let step = s.plan().unwrap();
+    assert_eq!(step.kind, GraphKind::Snapshot);
+    assert!(step.lanes.iter().all(|lane| s.request(lane.request).unwrap().snapshot_consumed() == consumed));
+    s.commit(&step, Fence(fence)).unwrap();
+    let completions = state_records(s, &step, fence);
+    s.complete(Fence(fence), &completions, Default::default()).unwrap();
+}
+
 fn retain_prompt(s: &mut RequestScheduler, fence: u64) {
     let step = s.phase_plan(GraphKind::Snapshot, None);
     assert_eq!(step.kind, GraphKind::Snapshot);

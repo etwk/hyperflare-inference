@@ -86,6 +86,22 @@ fn allowance(work: u64, fraction: f64) -> u64 {
     ((work as f64) * fraction).floor().min(u64::MAX as f64) as u64
 }
 
+/// Capture positions below `end`, largest first. Back from `end`: the last multiple of each power
+/// of two from the smallest capacity up, dense where a shared document usually stops and a
+/// different question begins. Forward from the start: the chunk size times each power of two, so a
+/// prefix shared past the first chunk keeps more than half its reuse. Positions are absolute, so
+/// siblings of different lengths publish and find the same keys; there are about two per doubling.
+fn aligned_endpoints(smallest: usize, chunk: usize, end: usize) -> Vec<usize> {
+    let doublings = |first: usize| std::iter::successors(Some(first), |step: &usize| step.checked_mul(2));
+    let mut ends: Vec<_> = doublings(smallest)
+        .map_while(|step| (step < end).then(|| (end - 1) / step * step))
+        .chain(doublings(chunk).take_while(|&step| step < end))
+        .collect();
+    ends.sort_unstable_by(|a, b| b.cmp(a));
+    ends.dedup();
+    ends
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PrefillCatalogCost {
     capacity: usize,
@@ -153,6 +169,14 @@ impl RequestScheduler {
             .unwrap();
         self.release_snapshot(guard);
         true
+    }
+
+    /// What copying one snapshot costs, retained after the estimate ages out as prefill costs
+    /// are: only captures measure it, so requiring a fresh estimate would turn optional captures
+    /// off for the first request after any idle estimate TTL. Unknown until a capture first
+    /// measures it, so optional captures start with the request after the first anchor capture.
+    fn snapshot_copy_ns(&self) -> Option<u64> {
+        self.costs.duration(GraphKind::Snapshot, 1, 1).filter(|&nanos| nanos != 0)
     }
 
     fn checkpoint_headroom(&self) -> usize {
@@ -424,7 +448,7 @@ impl RequestScheduler {
         let Some(prefill) = accounting.initial_prefill_ns else {
             return (accounting, true, false);
         };
-        let Some(copy_ns) = self.costs.fresh_duration(GraphKind::Snapshot, 1) else {
+        let Some(copy_ns) = self.snapshot_copy_ns() else {
             return (accounting, true, false);
         };
         let mut unknown = false;
@@ -436,14 +460,44 @@ impl RequestScheduler {
             .rev()
             .copied()
             .filter(|&end| start < end && end < anchor && request.checkpoint_endpoint_eligible(end))
-            .map(|end| (end, RetentionRole::Message))
+            .map(|end| (end, RetentionRole::Message, false))
             .collect();
         if start < request.prompt_tokens && request.prompt_tokens != anchor {
-            candidates.push((request.prompt_tokens, RetentionRole::Endpoint));
+            candidates.push((request.prompt_tokens, RetentionRole::Endpoint, false));
+        }
+        // Inside a final message longer than a chunk, aligned positions let a prefix shared within
+        // it be reused. They come last, so they spend only what the boundaries leave, and skipping
+        // one is not counted as a skipped capture. Windowed image prompts keep boundary captures
+        // only, and scored prompts never read the cache.
+        let chunk = self.limits.prefill_chunk_size;
+        let message_start = request
+            .message_boundaries
+            .iter()
+            .rev()
+            .copied()
+            .find(|&end| end < anchor)
+            .unwrap_or(0);
+        if anchor - message_start > chunk
+            && request.checkpoints.window_ends.is_empty()
+            && !request.prompt_logprobs
+        {
+            // A chunk ending at a capture runs as a terminal prefill when the core has them.
+            let smallest = self
+                .terminal_prefill_catalog
+                .first()
+                .or(self.prefill_catalog.first())
+                .copied()
+                .unwrap_or(chunk);
+            candidates.extend(
+                aligned_endpoints(smallest, chunk, anchor)
+                    .into_iter()
+                    .filter(|&end| start.max(message_start) < end && request.checkpoint_endpoint_eligible(end))
+                    .map(|end| (end, RetentionRole::Endpoint, true)),
+            );
         }
         // The interval between accepted cuts is shared by every candidate inside it.
         let mut between: Option<((usize, usize), Option<u64>)> = None;
-        for (endpoint, role) in candidates {
+        for (endpoint, role, aligned) in candidates {
             let left = accounting
                 .cuts
                 .iter()
@@ -494,7 +548,7 @@ impl RequestScheduler {
                 })
             };
             let Some(split_ns) = split else {
-                unknown = true;
+                unknown |= !aligned;
                 continue;
             };
             let charge = split_ns.saturating_add(copy_ns);
@@ -504,7 +558,7 @@ impl RequestScheduler {
                 .saturating_add(charge)
                 > available
             {
-                budget = true;
+                budget |= !aligned;
                 continue;
             }
             let rank = RetentionRank {
@@ -727,7 +781,7 @@ impl RequestScheduler {
         if capture.role == RetentionRole::Anchor {
             return Ok(true);
         }
-        if self.costs.fresh_duration(GraphKind::Snapshot, 1).is_none() {
+        if self.snapshot_copy_ns().is_none() {
             return Ok(false);
         }
         let accounting = &self.request(handle)?.checkpoints;
@@ -788,7 +842,7 @@ impl RequestScheduler {
         let (mut accounting, _, _) = self.checkpoint_selection(request);
         accounting.cuts.clear();
         accounting.reserved_ns = 0;
-        let Some(cost) = self.costs.fresh_duration(GraphKind::Snapshot, 1) else {
+        let Some(cost) = self.snapshot_copy_ns() else {
             self.stats.checkpoint_skip_unknown_cost += 1;
             return Ok(None);
         };
@@ -1260,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_prefill_or_stale_snapshot_cost_disables_extras() {
+    fn unknown_prefill_cost_disables_extras() {
         let mut scheduler = super::super::tests::scheduler(1, 128, 16);
         let mut spec = super::super::tests::spec(1024, 3);
         spec.message_boundaries = vec![128, 256, 512, 896];
@@ -1270,33 +1324,61 @@ mod tests {
         let (unknown, _, _) = scheduler.checkpoint_selection(scheduler.request(handle).unwrap());
         assert_eq!(unknown.initial_prefill_ns, None);
         assert_eq!(unknown.cuts.len(), 1);
-        linear_costs(&mut scheduler);
-        scheduler
-            .advance_to(scheduler.policy.estimate_ttl_ns)
-            .unwrap();
-        let (stale, _, _) = scheduler.checkpoint_selection(scheduler.request(handle).unwrap());
-        assert_eq!(stale.initial_prefill_ns, Some(1_024_000));
-        assert_eq!(stale.cuts.len(), 1);
     }
 
     #[test]
-    fn measured_prefill_costs_keep_extras_available_after_idle() {
-        let mut scheduler = super::super::tests::scheduler(1, 128, 16);
-        linear_costs(&mut scheduler);
-        scheduler.advance_to(scheduler.policy.estimate_ttl_ns).unwrap();
-        measure(&mut scheduler, GraphKind::Snapshot, 1, 1);
-        let mut spec = super::super::tests::spec(1024, 3);
-        spec.message_boundaries = vec![128, 256, 512, 896];
-        let handle = scheduler.admit(spec).unwrap();
-        let (selected, unknown, budget) =
-            scheduler.checkpoint_selection(scheduler.request(handle).unwrap());
-        assert!(!unknown);
-        assert!(!budget);
-        assert_eq!(selected.initial_prefill_ns, Some(1_024_000));
-        assert_eq!(
-            selected.cuts.iter().map(|cut| cut.endpoint).collect::<Vec<_>>(),
-            [128, 256, 512, 896, 1024]
-        );
+    fn aligned_endpoints_are_dense_at_the_end_and_keep_half_of_any_shared_prefix() {
+        for (smallest, chunk) in [(128, 512), (512, 8192)] {
+            let prompts = (1..40 * chunk).step_by(97).chain([chunk, chunk + 1, 2 * chunk, 1 << 20]);
+            for prompt in prompts {
+                let ends = aligned_endpoints(smallest, chunk, prompt);
+                assert!(ends.windows(2).all(|pair| pair[0] > pair[1]), "{prompt}: {ends:?}");
+                assert!(
+                    ends.iter().all(|&end| 0 < end && end < prompt && end % smallest == 0),
+                    "{prompt}: {ends:?}"
+                );
+                // A sibling diverging just before the end reuses all but the last capacity.
+                if prompt > smallest {
+                    assert_eq!(ends.first(), Some(&((prompt - 1) / smallest * smallest)));
+                }
+                for shared in (chunk..prompt).step_by(chunk / 4 + 1) {
+                    let reused = ends.iter().copied().find(|&end| end <= shared).unwrap();
+                    assert!(2 * reused > shared, "{prompt}: shared {shared}, reused {reused}");
+                }
+                let doublings = (usize::BITS - (prompt / smallest).leading_zeros()) as usize;
+                assert!(ends.len() <= 2 * doublings, "{prompt}: {ends:?}");
+            }
+        }
+    }
+
+    /// A snapshot copy that has never run is unknown, which turns optional captures off. One
+    /// measured before an idle estimate TTL still prices them: only captures measure it.
+    #[test]
+    fn snapshot_cost_is_unknown_until_measured_and_kept_after_idle() {
+        for measured in [false, true] {
+            let mut scheduler = super::super::tests::scheduler(1, 128, 16);
+            // The core declares its snapshot graph; serving starts with it unmeasured.
+            scheduler.graph_durations(&super::super::tests::duration_graphs(1)).unwrap();
+            for capacity in scheduler.prefill_catalog.clone() {
+                measure(&mut scheduler, GraphKind::Prefill, capacity, capacity as u64 * 1000);
+            }
+            if measured {
+                measure(&mut scheduler, GraphKind::Snapshot, 1, 7);
+            }
+            scheduler.advance_to(scheduler.policy.estimate_ttl_ns).unwrap();
+            let mut spec = super::super::tests::spec(1024, 3);
+            spec.message_boundaries = vec![128, 256, 512, 896];
+            let handle = scheduler.admit(spec).unwrap();
+            let (selected, unknown, budget) =
+                scheduler.checkpoint_selection(scheduler.request(handle).unwrap());
+            assert_eq!((unknown, budget), (!measured, false), "measured {measured}");
+            let cuts: Vec<_> = selected.cuts.iter().map(|cut| (cut.endpoint, cut.copy_ns)).collect();
+            if measured {
+                assert_eq!(cuts, [(128, 7), (256, 7), (512, 7), (896, 0), (1024, 7)]);
+            } else {
+                assert_eq!(cuts, [(896, 0)]);
+            }
+        }
     }
 
     #[test]

@@ -423,7 +423,7 @@ For Qwen at concurrency four:
 | Context limit | 262,144 tokens |
 | Main KV / GDN recurrence | BF16 / FP32 |
 | PLE delivery | Compact GPU rows supplied by Helios from disk or RAM |
-| Checkpoint endpoints | Rendered message endpoints, final prompt, and terminal consumed prefix |
+| Checkpoint endpoints | Rendered message endpoints, aligned positions in a long final message, final prompt, and terminal consumed prefix |
 | MTP draft limit | Five drafts plus the pending input |
 | Speculative scheduling | Up to two complete generation programs in flight when dependencies permit |
 | Vision | Prepared image capacities; video requires separate validation |
@@ -1443,9 +1443,25 @@ Extra captures use a request-local work allowance. Its prefill component is
 `scheduler_checkpoint_extra_work_fraction` times the estimated uncached prefill
 work, with a default fraction of 0.05. An extra endpoint charges the additional
 predicted prefill time caused by splitting its enclosing interval, plus its
-snapshot-copy time. Prefill estimates retain measured costs after expiry, as
-ordinary dispatch does. Unknown prefill costs or unknown or stale snapshot-copy
-costs exclude extras without excluding the anchor. Productive completed decode
+snapshot-copy time. Prefill and snapshot-copy estimates retain measured costs
+after expiry, as ordinary dispatch does. Unknown prefill or snapshot-copy costs
+exclude extras without excluding the anchor; the copy is unknown until the first
+capture measures it.
+
+When the final message before the anchor is longer than one prefill chunk, a
+prefix shared inside it would otherwise have no endpoint. Aligned positions
+inside that message then compete after the boundaries, for the allowance they
+leave. Back from the anchor, they are the last multiple of each power of two,
+starting at the smallest terminal prefill capacity, or the smallest prefill
+capacity when the core has no terminal catalog. Forward from the prompt start,
+they are the chunk size times each power of two. When the message starts the
+prompt, a request sharing more than one chunk of it can reuse more than half of
+the shared prefix. When the text after the shared part is shorter than the
+smallest capacity, a capture usually falls less than one capacity before the
+end of the shared part. The positions are absolute, so requests of different
+lengths capture and find the same prefixes. Windowed image prompts
+and scored prompts use no aligned positions. Skipped aligned positions are not
+counted as skipped captures. Productive completed decode
 earns the same fraction of measured decode time for a distinct terminal
 endpoint. A coincident prompt and terminal endpoint uses one capture. Mandatory
 conditioned-input state transfers do not consume this allowance. Preemption

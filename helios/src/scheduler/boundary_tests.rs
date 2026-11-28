@@ -742,6 +742,27 @@ fn snapshot_pressure_retains_complete_conversations_until_endpoint_eviction() {
 }
 
 #[test]
+fn a_document_shared_inside_one_message_is_reused_through_an_aligned_cut() {
+    // One message holds a document and a question; siblings ask other questions. Boundaries
+    // alone cut only at the message end, past the question, so nothing was reused.
+    let mut s = scheduler_with_concurrency(16, false, 64, 1);
+    linear_checkpoint_costs(&mut s, 0.05);
+    let mut first = spec(None, 2000, 1);
+    first.message_boundaries = vec![1990];
+    let first = s.admit(first).unwrap();
+    finish(&mut s, first);
+    // Aligned cuts at 1920, 1792, 1536, 1024 and 512 (the catalog's smallest capacity is 128).
+    for (shared, reused) in [(1985, 1920), (1900, 1792), (1100, 1024), (700, 512), (400, 0)] {
+        let mut sibling = spec(None, shared + 20, 1);
+        sibling.prompt[shared..].fill(1000);
+        sibling.message_boundaries = vec![shared + 10];
+        let sibling = s.admit(sibling).unwrap();
+        assert_eq!(s.request(sibling).unwrap().reused_prompt_tokens(), reused, "shared {shared}");
+        s.cancel(sibling).unwrap();
+    }
+}
+
+#[test]
 fn every_message_endpoint_can_restore_after_a_changed_following_turn() {
     let endpoints = vec![1, 7, 63, 64, 65, 129, 300, 514, 700];
     for page_tokens in [64, 128, 256, 2048] {

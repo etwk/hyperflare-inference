@@ -553,12 +553,14 @@ after completion.
 Checkpoint retention uses the exact token endpoints supplied by the native
 frontend. The last eligible completed message is a best-effort conversation
 anchor; the prompt end substitutes when there is no eligible message. Earlier
-messages are considered in reverse order, followed by a distinct prompt end.
+messages are considered in reverse order, followed by a distinct prompt end and
+then by aligned positions inside a final message longer than one prefill chunk
+([core design](core-design.md) gives the positions).
 Additional prefill splits and snapshot copies must fit a request-local allowance
 of `scheduler_checkpoint_extra_work_fraction` times estimated uncached prefill
-work, defaulting to 0.05. Prefill predictions use measured costs, including stale
-estimates retained for dispatch ranking. Unknown prefill costs and unknown or
-stale snapshot-copy costs disable extras while preserving anchor eligibility.
+work, defaulting to 0.05. Prefill and snapshot-copy predictions use measured
+costs, including stale estimates retained for dispatch ranking. Unknown prefill
+or snapshot-copy costs disable extras while preserving anchor eligibility.
 Productive completed decode earns the same fraction of measured time for a
 distinct terminal capture. There is no fixed capture count or
 concurrency-based snapshot share.
