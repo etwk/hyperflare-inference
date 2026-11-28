@@ -1404,7 +1404,8 @@ verified model-card sampling defaults, and the engine's output limit.
 Sampling defaults are explicit core metadata; config-file sampling values
 do not select them. Sampling requests are clamped to the core's inclusive
 model-author ranges; parameters without ranges are fixed at their defaults.
-The request controls the seed.
+The request controls the seed; a generation request that carries none draws a
+random seed.
 
 `memory.reserve` exists for one case: a process that starts after Flare and
 needs GPU memory. Processes already running when Flare starts need no
@@ -1453,7 +1454,8 @@ Configuration assigns each decision to one owner:
 | Served names | Recipe canonical model name as the serving alias, plus the checkpoint repository ID, or a local checkpoint directory's name, as the model ID, exposed through `/v1/models`; native `--served-model-name` replaces the alias |
 | API key | `[server] api_key`, overridden by native `--api-key-file`; excluded from cores |
 | Sampling distribution controls | Recipe defaults and optional model-author ranges; request values clamp to ranges, or to defaults when no range exists |
-| Seed, output limit, and stops | Request fields, with declared defaults for missing values |
+| Seed | Request field; a generation request without one draws a random seed |
+| Output limit and stops | Request fields, with declared defaults for missing values |
 
 Explicit request values take precedence within the declared sampling bounds. Speculation's benefit
 depends on native confidence or measured acceptance and execution cost. Reducing the draft limit at
