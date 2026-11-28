@@ -792,7 +792,7 @@ adaptive speculative execution:
 
 ```sh
 FLARE_RUN_CUDA_TESTS=1 FLARE_SCHEDULER_TEST_URL=http://127.0.0.1:18131 \
-  .venv/bin/python -m pytest -q -s tests/server/test_scheduler.py
+  ../hyperflare-recipes/.venv/bin/python -m pytest -q -s tests/server/test_scheduler.py
 ```
 
 The HTTP tests print actual prompt/output token counts, client SSE arrival

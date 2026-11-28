@@ -760,12 +760,12 @@ noise, correlation, rare outliers, changed costs, context/occupancy mismatch,
 expensive unknown graphs, and missing measurements.
 
 ```sh
-.venv/bin/python -m scripts.scheduling_sim.learning \
+../hyperflare-recipes/.venv/bin/python -m scripts.scheduling_sim.learning \
   --preset screen --screen-grid --workers 12 \
   --reference ttl \
   --output /tmp/flare-learning-tuning
 
-.venv/bin/python -m scripts.scheduling_sim.learning \
+../hyperflare-recipes/.venv/bin/python -m scripts.scheduling_sim.learning \
   --preset validate --configs /tmp/flare-learning-tuning/nominated.json \
   --reference ttl \
   --workers 12 --output /tmp/flare-learning-validation

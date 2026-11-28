@@ -730,7 +730,9 @@ def test_linked_companions_validate_targets_and_stored_data(native, tmp_path, re
     assert read(native, path, weights=False).returncode == 0
     assert 'stored-data content verification failed' in read(native, path, weights=True).stderr
     target.write_bytes(target.read_bytes()[:-1])
-    assert 'payload length' in read(native, path, weights=False).stderr
+    truncated = read(native, path, weights=False)
+    assert truncated.returncode != 0
+    assert 'safetensors data length differs from model core' in truncated.stderr
     with pytest.raises(ValueError, match='data length'):
         assert_shard_contents(path, expected)
 

@@ -1497,7 +1497,7 @@ containing ordinary and MTP5 graphs:
 cargo build --release --manifest-path flare-cli/Cargo.toml
 CUDA_VISIBLE_DEVICES=0 FLARE_RUN_CUDA_TESTS=1 \
 FLARE_OFFLOAD_TEST_CORE=/path/to/qwen-tp1-mtp5-core.safetensors \
-.venv/bin/python -m pytest tests/server/test_prefix_cache_offload.py -q \
+../hyperflare-recipes/.venv/bin/python -m pytest tests/server/test_prefix_cache_offload.py -q \
   --basetemp /path/to/offload-tests/http
 ```
 
