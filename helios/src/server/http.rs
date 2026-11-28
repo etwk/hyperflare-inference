@@ -194,6 +194,15 @@ pub(super) async fn generate(
         let body = decode_body(&bytes, &encoding, prepare_state.max_body_bytes)?;
         let mut decoded = protocol::decode(protocol, body, count)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        // A request without a seed must not repeat an earlier sample. One draw per
+        // request: the generations of an `n > 1` or multi-prompt request add their
+        // index to it, so they differ from each other as well.
+        decoded
+            .request
+            .options
+            .sampling
+            .seed
+            .get_or_insert_with(super::random_u64);
         if protocol != Protocol::Completions {
             decoded.request.options.thinking_budget =
                 decoded.request.options.thinking_budget.or(prepare_state

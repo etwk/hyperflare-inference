@@ -39,7 +39,7 @@ The additional `flare` object reports prepared and selected serving metadata:
 | `max_concurrency` | Selected maximum active requests |
 | `prefill_chunk_size` | Maximum tokens in a prefill chunk, not the context limit |
 | `default_max_tokens` | Default output-token budget when a request omits it; remaining context also bounds output |
-| `sampling_defaults` | Prepared seed, temperature, filters, and penalties used for omitted request fields |
+| `sampling_defaults` | Prepared seed, temperature, filters, and penalties used for omitted request fields; the generation endpoints replace an omitted seed with a random one |
 | `thinking_token_budget` | Operator default reasoning-token cap for conversational requests; null when unset |
 | `sampling_ranges` | Inclusive `{min, max}` bounds for distribution parameters; null fixes a parameter at its prepared default; seed is request-controlled |
 | `max_images_per_prompt` | Context-derived upper bound on image count; image sizes, framing, text, output, and HTTP body size further constrain admission; zero for text-only cores |
@@ -747,8 +747,13 @@ in cores exported without range metadata. Ranges must contain their defaults
 and valid sampler values; temperature bounds are positive. For example,
 `temperature: 0` becomes the declared minimum, or the default if no range exists.
 Malformed types return HTTP 400; `top_k` must be an integer. `seed` is
-request-controlled and uses its prepared default when omitted. Sampling defaults
-and ranges come from the model author's recommendations declared in the recipe,
+request-controlled. A request to the Chat Completions, Completions, Messages, or
+Responses endpoint without a seed draws one random seed, so repeating the request
+does not repeat its sample; an explicit seed, including 0, is used unchanged. The
+seed in the prepared sampling defaults applies only to requests prepared outside
+those endpoints, such as direct callers of `prepare_request` and `/v1/decisions`,
+which scores log probabilities and does not depend on the sampled token. Sampling
+defaults and ranges come from the model author's recommendations declared in the recipe,
 except for DeepSeek V4.1's repetition-penalty range based on measured use.
 
 The recipes use these default-mode settings. Parameters without an interval in
@@ -918,7 +923,7 @@ arrays are rejected. Raw prompts bypass chat templates and reasoning/tool parser
 
 `n` generates independent choices for each prompt. Choice indices are
 `prompt_index * n + choice_index`; buffered results use that order and streams may
-interleave indices. The configured or explicit seed advances by choice index. `echo` prepends the
+interleave indices. The request's seed, explicit or drawn, advances by choice index. `echo` prepends the
 original text or decoded token prompt. `max_tokens: 0` performs tokenization and
 optional echo without GPU submission. Prompt usage counts each input once;
 cached usage uses the first choice's admission count for each input, independent

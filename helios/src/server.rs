@@ -174,8 +174,9 @@ struct HttpState {
     generated: Mutex<VecDeque<(Instant, u64)>>,
     accepting: Mutex<bool>,
 }
-/// Distinguishes one server start from another; the standard hasher's keys are random.
-fn run_id() -> u64 {
+/// A fresh unpredictable value: the standard hasher's keys are random per thread
+/// and advance on every `RandomState::new`.
+fn random_u64() -> u64 {
     use std::hash::BuildHasher;
     std::collections::hash_map::RandomState::new().hash_one(0u8)
 }
@@ -321,7 +322,7 @@ impl Server {
             max_body_bytes: config.max_body_bytes,
             frontend_capacity: config.frontend_workers,
             ingress_capacity,
-            run: run_id(),
+            run: random_u64(),
             ids: AtomicU64::new(1),
             api_key: config.api_key.clone(),
             thinking_token_budget: config.thinking_token_budget,

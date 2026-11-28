@@ -4187,7 +4187,7 @@ fn http_state_for(
         max_body_bytes: 65536,
         frontend_capacity: 1,
         ingress_capacity: 4,
-        run: crate::server::run_id(),
+        run: crate::server::random_u64(),
         ids: Default::default(),
         api_key,
         thinking_token_budget: None,
@@ -4381,6 +4381,7 @@ async fn http_generation_request_observed(
         .method("POST")
         .uri(path)
         .header("content-type", "application/json")
+        .header("anthropic-version", "2023-06-01")
         .body(axum::body::Body::from(body.to_string()))
         .unwrap();
     let response = tokio::spawn(http::generate(State(state.clone()), Extension(ingress), request));
@@ -4392,6 +4393,61 @@ async fn http_generation_request_observed(
     .await
     .unwrap();
     (response, incoming, state)
+}
+
+/// The seed each generation of one admitted HTTP request samples with.
+fn admitted_seeds(incoming: &[Incoming]) -> Vec<u64> {
+    incoming.iter().map(|i| i.prompt.sampling.seed).collect()
+}
+
+#[tokio::test]
+async fn a_request_without_a_seed_samples_with_a_fresh_seed() {
+    let messages = serde_json::json!([{"role":"user","content":"a"}]);
+    for (path, body) in [
+        ("/v1/completions", serde_json::json!({"prompt":"a","max_tokens":2})),
+        ("/v1/chat/completions", serde_json::json!({"messages":messages,"max_tokens":2})),
+        ("/v1/messages", serde_json::json!({"messages":messages,"max_tokens":2})),
+        ("/v1/responses", serde_json::json!({"input":"a","max_output_tokens":2})),
+    ] {
+        let (_first, first) = http_generation_request(path, body.clone()).await;
+        let (_second, second) = http_generation_request(path, body).await;
+        assert_ne!(admitted_seeds(&first), admitted_seeds(&second), "{path}");
+    }
+    // `n` and a prompt batch offset the request's seed by the generation index.
+    for body in [
+        serde_json::json!({"prompt":"a","max_tokens":2,"n":3}),
+        serde_json::json!({"prompt":["a","b","c"],"max_tokens":2}),
+    ] {
+        let (_response, incoming) = http_generation_request("/v1/completions", body).await;
+        let seeds = admitted_seeds(&incoming);
+        let base = seeds[0];
+        assert_eq!(seeds, [base, base.wrapping_add(1), base.wrapping_add(2)]);
+    }
+}
+
+#[tokio::test]
+async fn an_explicit_seed_reproduces_exactly() {
+    for seed in [0u64, 7, u64::MAX] {
+        for path in ["/v1/completions", "/v1/chat/completions"] {
+            let body = if path == "/v1/completions" {
+                serde_json::json!({"prompt":"a","max_tokens":2,"seed":seed,"n":2})
+            } else {
+                serde_json::json!({"messages":[{"role":"user","content":"a"}],
+                    "max_tokens":2,"seed":seed})
+            };
+            let (_first, first) = http_generation_request(path, body.clone()).await;
+            let (_second, second) = http_generation_request(path, body).await;
+            assert_eq!(
+                admitted_seeds(&first),
+                admitted_seeds(&second),
+                "{path} {seed}"
+            );
+            assert_eq!(first[0].prompt.sampling.seed, seed, "{path}");
+            if path == "/v1/completions" {
+                assert_eq!(admitted_seeds(&first), [seed, seed.wrapping_add(1)]);
+            }
+        }
+    }
 }
 
 #[tokio::test]
