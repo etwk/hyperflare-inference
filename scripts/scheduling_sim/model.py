@@ -49,6 +49,7 @@ class View:
     acceptance: tuple[float, ...]
     weight: float = 1.0
     last_service_ms: float = 0.0
+    arrival_ms: float = 0.0
 
     def __post_init__(self):
         if self.remaining_prefill < 0 or self.output_budget < 1:

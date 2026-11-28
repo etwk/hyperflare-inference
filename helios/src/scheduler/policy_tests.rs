@@ -1141,7 +1141,7 @@ fn late_publication_cannot_rewind_prices_past_another_completion() {
 }
 
 #[test]
-fn first_published_output_initializes_delivery_history_and_preserves_token_price() {
+fn first_published_output_serves_the_prompt_delivery_and_preserves_token_price() {
     let mut s = engine(1, false);
     let h = add(&mut s, 1, 65, 64);
     step(&mut s, 0);
@@ -1149,12 +1149,22 @@ fn first_published_output_initializes_delivery_history_and_preserves_token_price
     let a = Fence(s.submitted.0 + 1);
     s.commit(&prefill, a).unwrap();
     let mut tokens = s.request(h).unwrap().accounting.service.tokens.unwrap();
-    let rate = s.service_rates(s.request(h).unwrap()).0.unwrap();
-    tokens.observe(3.0, 66.0, rate, s.policy.adaptation_ms);
+    let (rate, delivery_rate) = s.service_rates(s.request(h).unwrap());
+    // The 3 ms 128-token graph serves the prompt and its output at the highest token rate,
+    // so the first output advances at that graph's launch rate.
+    assert_eq!(delivery_rate, Some(1.0 / 3.0));
+    tokens.observe(3.0, 66.0, rate.unwrap(), s.policy.adaptation_ms);
+    let mut deliveries = s
+        .request(h)
+        .unwrap()
+        .accounting
+        .service
+        .deliveries
+        .expect("a prompt holds a delivery price before its first output");
+    deliveries.observe(3.0, 1.0, 1.0 / 3.0, s.policy.adaptation_ms);
     complete_timed(&mut s, &prefill, a, 0, true, gpu_time(3 * MS));
     let service = s.request(h).unwrap().accounting.service;
     price_close(service.tokens.unwrap(), tokens);
-    let deliveries = utility::ServicePrice::initial(1.0 / 3.0);
     price_close(service.deliveries.unwrap(), deliveries);
     let snapshot = s.plan().unwrap();
     assert_eq!(snapshot.kind, GraphKind::Snapshot);
@@ -1162,6 +1172,21 @@ fn first_published_output_initializes_delivery_history_and_preserves_token_price
     let service = s.request(h).unwrap().accounting.service;
     price_close(service.tokens.unwrap(), tokens);
     price_close(service.deliveries.unwrap(), deliveries);
+}
+
+#[test]
+fn first_published_output_without_a_measured_rate_initializes_delivery_history() {
+    let mut s = cold_engine(1, false);
+    let h = add(&mut s, 1, 65, 64);
+    while s.request(h).unwrap().generated_tokens == 0 {
+        assert!(s.request(h).unwrap().accounting.service.deliveries.is_none());
+        let plan = s.plan().unwrap();
+        let fence = Fence(s.submitted.0 + 1);
+        s.commit(&plan, fence).unwrap();
+        complete_timed(&mut s, &plan, fence, 0, true, gpu_time(3 * MS));
+    }
+    let deliveries = s.request(h).unwrap().accounting.service.deliveries.unwrap();
+    price_close(deliveries, utility::ServicePrice::initial(1.0 / 3.0));
 }
 
 fn cold_engine(active: usize, speculative: bool) -> RequestScheduler {
@@ -1281,29 +1306,36 @@ fn long_conversations_use_work_budget_and_cross_unselected_messages() {
 
 #[test]
 fn one_two_and_sixteen_long_prefills_use_full_efficient_chunks() {
-    for count in [1, 2, 16] {
+    // A prompt's age clock prices its first output, not the duration of its own chunks,
+    // so even a dominant age price keeps prompt-only service on the most efficient graph.
+    // Aligned captures near a prompt's end shorten chunks by design; without their
+    // allowance, only the graph limits a chunk.
+    for (count, decode_age_price) in [(1, 0.1), (2, 0.1), (16, 0.1), (1, 1000.0), (16, 1000.0)] {
         let mut s = interactive_engine(count, true);
+        s.configure_policy(PolicyConfig {
+            decode_age_price,
+            checkpoint_extra_work_fraction: 0.0,
+            ..s.policy
+        })
+        .unwrap();
         let handles: Vec<_> = (1..=count as u32)
             .map(|id| add(&mut s, id, 32768, 128))
             .collect();
+        // Service stays prompt-only until the first output; decode then competes for time.
         let mut chunks = 0;
-        while chunks < count * 3 {
+        while chunks < count * 3
+            && handles
+                .iter()
+                .all(|h| s.request(*h).unwrap().generated_tokens == 0)
+        {
             let plan = step(&mut s, 0);
             if plan.kind == GraphKind::Prefill {
                 assert_eq!((plan.token_capacity, plan.lanes[0].tokens), (4096, 4096));
                 chunks += 1;
             }
-            assert!(
-                handles
-                    .iter()
-                    .all(|h| s.request(*h).unwrap().generated_tokens == 0)
-            );
         }
-        assert!(
-            handles
-                .iter()
-                .all(|h| s.request(*h).unwrap().consumed_tokens > 0)
-        );
+        // A 32768-token prompt needs eight chunks, so at least seven precede any output.
+        assert!(chunks >= (count * 3).min(7), "{count} prompts ran {chunks} full chunks");
     }
 }
 
@@ -1608,7 +1640,7 @@ fn five_and_sixteen_streams_receive_repeated_output_service() {
 }
 
 #[test]
-fn delivery_reference_uses_batch_throughput_and_excludes_prefill_only_requests() {
+fn delivery_reference_uses_batch_throughput_and_counts_requests_awaiting_first_output() {
     let mut s = interactive_engine(16, true);
     let handles: Vec<_> = (1..=2).map(|id| add(&mut s, id, 64, 4096)).collect();
     ready(&mut s, &handles);
@@ -1622,40 +1654,95 @@ fn delivery_reference_uses_batch_throughput_and_excludes_prefill_only_requests()
         s.delivery_reference_intervals(&rates)
     };
     assert_eq!(references(&s)[handles[0].slot as usize], Some(17.0));
-    for id in 3..=16 {
-        add(&mut s, id, 32768, 128);
+    let prompts: Vec<_> = (3..=16).map(|id| add(&mut s, id, 32768, 128)).collect();
+    // Sixteen delivery-bearing streams share a two-row speculative round of 17 ms, and
+    // each prompt's first output advances through its 66 ms 4096-token prefill graph.
+    let shared = references(&s);
+    assert_eq!(shared[handles[0].slot as usize], Some(16.0 * 17.0 / 2.0));
+    for prompt in &prompts {
+        let reference = shared[prompt.slot as usize].unwrap();
+        assert!((reference - 16.0 * 66.0).abs() < 1e-9, "prompt reference={reference}");
     }
-    assert_eq!(references(&s)[handles[0].slot as usize], Some(17.0));
     set_cost(&mut s, GraphKind::Speculative, 16, 1, MS);
-    assert_eq!(references(&s)[handles[0].slot as usize], Some(1.0));
+    assert_eq!(references(&s)[handles[0].slot as usize], Some(16.0 / 2.0));
     let retained = references(&s);
     s.advance_to(s.now_ns + s.policy.estimate_ttl_ns).unwrap();
     assert_eq!(references(&s), retained);
 }
 
 #[test]
+fn a_prompt_arriving_among_fifteen_decoders_reaches_its_first_output_promptly() {
+    let mut s = interactive_engine(16, true);
+    let decoders: Vec<_> = (1..=15).map(|id| add(&mut s, id, 64, 4096)).collect();
+    ready(&mut s, &decoders);
+    for &h in &decoders {
+        for _ in 0..128 {
+            s.request_mut(h)
+                .unwrap()
+                .acceptance
+                .observe(speculation::ProposalSource::Mtp, 0, 7, 7, true, None);
+        }
+    }
+    for _ in 0..20 {
+        step(&mut s, 7);
+    }
+    // A chat prompt ends with a message boundary two tokens before its end, so its first
+    // output follows a prefill to the boundary, a boundary snapshot, and a two-token tail.
+    let arrival = s.now_ns;
+    let prompt = s.admit(RequestSpec {
+        prompt: vec![16; 400],
+        message_boundaries: vec![398],
+        conditioning: vec![],
+        max_new_tokens: 128,
+        grammar_constrained: false,
+        host_stops: false,
+        prompt_logprobs: false,
+        growable_output: false,
+    }).unwrap();
+    let mut kinds = Vec::new();
+    while s.request(prompt).unwrap().generated_tokens == 0 {
+        let plan = step(&mut s, 7);
+        if plan.lanes.iter().any(|lane| lane.request == prompt) {
+            kinds.push(plan.kind);
+        }
+        assert!(s.now_ns - arrival < 5_000 * MS, "the prompt received no output");
+    }
+    assert!(kinds.contains(&GraphKind::Snapshot), "prompt stages: {kinds:?}");
+    let ttft = (s.now_ns - arrival) / MS;
+    assert!(ttft < 300, "first output after {ttft} ms; prompt stages: {kinds:?}");
+}
+
+#[test]
 fn snapshot_enabling_a_shared_decode_batch_competes_by_the_complete_sequence_cost() {
     let mut s = interactive_engine(16, true);
-    let handles: Vec<_> = (1..=16).map(|id| add(&mut s, id, 64, 4096)).collect();
-    for &h in &handles {
+    let observed = |s: &mut RequestScheduler, id| {
+        let h = add(s, id, 64, 4096);
         for _ in 0..128 {
             s.request_mut(h).unwrap().acceptance.observe(speculation::ProposalSource::Mtp, 0, 7, 7, true, None);
         }
-    }
-    for _ in 0..200 {
-        let decoding = handles
-            .iter()
-            .filter(|h| s.request(**h).unwrap().phase == RequestPhase::Decode)
-            .count();
-        let copying = handles
-            .iter()
-            .filter(|h| s.request(**h).unwrap().phase == RequestPhase::Snapshot)
-            .count();
-        if decoding == 15 && copying == 1 {
+        h
+    };
+    let decoding = |s: &RequestScheduler, handles: &[RequestHandle]| {
+        handles.iter().filter(|h| s.request(**h).unwrap().phase == RequestPhase::Decode).count()
+    };
+    // Fifteen streams decode before the sixteenth arrives, so its prompt-end snapshot alone
+    // stands between the decode batch and its full width.
+    let mut handles: Vec<_> = (1..=15).map(|id| observed(&mut s, id)).collect();
+    for _ in 0..500 {
+        if decoding(&s, &handles) == 15 {
             break;
         }
         step(&mut s, 7);
     }
+    handles.push(observed(&mut s, 16));
+    for _ in 0..500 {
+        if s.request(handles[15]).unwrap().phase == RequestPhase::Snapshot {
+            break;
+        }
+        step(&mut s, 7);
+    }
+    assert_eq!(s.request(handles[15]).unwrap().phase, RequestPhase::Snapshot);
+    assert_eq!(decoding(&s, &handles), 15);
     let plan = s.plan().unwrap();
     assert_eq!(plan.kind, GraphKind::Snapshot);
     assert_eq!(plan.lanes.len(), 1);

@@ -473,9 +473,14 @@ impl RequestScheduler {
                     matches!(submission.kind, GraphKind::Decode | GraphKind::Speculative)
                     && submission.lanes.iter().any(|lane| lane.request == r.handle))
                     .map(|submission| submission.expected_finish_ns).max()
-                    .unwrap_or_else(|| r.accounting.last_output_ns.unwrap_or(r.accounting.last_progress_ns));
+                    .unwrap_or_else(|| r.accounting.last_output_ns.unwrap_or(r.accounting.arrival_ns));
                 values[slot].age_ms = self.now_ns.saturating_add(window_ns)
                     .saturating_sub(last_delivery) as f64 / 1e6;
+                if r.consumed_tokens < r.prompt_tokens as u64 {
+                    let rate = tokens.expect("a prompt's delivery rate comes from its token rate");
+                    values[slot].delivery_tokens = (r.prompt_tokens as u64 - r.consumed_tokens + 1) as f64;
+                    values[slot].delivery_ms = values[slot].delivery_tokens / rate;
+                }
             }
             scale = scale.max(token_log[slot]).max(delivery_log[slot]);
         }
@@ -488,7 +493,10 @@ impl RequestScheduler {
             value.delivery = (delivery_log[slot] - scale).exp();
             value.terminal *= unit;
             value.age_price *= unit;
-            age_price += value.age_price;
+            // A prompt's age can reset only at its first output, whose value prices it.
+            if value.delivery_tokens == 0.0 {
+                age_price += value.age_price;
+            }
         }
         (values, age_price, scale)
     }

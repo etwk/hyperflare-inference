@@ -24,7 +24,7 @@ class State:
     def view(self) -> View:
         r = self.request
         return View(r.name, self.remaining_prefill, r.max_new_tokens - self.generated,
-                    r.acceptance, r.weight, self.last_service_ms)
+                    r.acceptance, r.weight, self.last_service_ms, r.arrival_ms)
 
 
 @dataclass

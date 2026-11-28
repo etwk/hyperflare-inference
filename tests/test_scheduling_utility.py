@@ -176,16 +176,23 @@ def test_normalizer_changes_preserve_the_marginal_service_price(history):
 def test_delivery_reference_and_initial_price_use_feasible_batch_service(count):
     graphs = catalog()
     streams = [View(f"d{i}", 0, 4096, (1.0,) * 7) for i in range(count)]
-    expected = min(count * g.duration_ms / min(count, g.decode_capacity)
-                   for g in graphs if g.decode_capacity)
-    for extra_prefills in (0, 7):
+    # A 32768-token prompt's most token-efficient graph is the 66 ms 4096-token prefill.
+    efficient_prefill_ms = 2 + 4096 / 64
+    for prompts in (0, 7):
+        delivering = count + prompts
+        expected = min(delivering * g.duration_ms / min(count, g.decode_capacity)
+                       for g in graphs if g.decode_capacity)
         policy = scheduler(age=0.1)
-        policy.prepare(streams + [View(f"p{i}", 32768, 4096, ())
-                                  for i in range(extra_prefills)], graphs)
-        assert len(policy.ages) == count
+        waiting = [View(f"p{i}", 32768, 4096, ()) for i in range(prompts)]
+        policy.prepare(waiting + streams, graphs)
+        assert len(policy.ages) == delivering
         for stream in streams:
             assert policy.ages[stream.name][1] == pytest.approx(expected)
             assert policy.prices[stream.name].deliveries.value(1, 0) == pytest.approx(4 * expected)
+        for prompt in waiting:
+            assert policy.ages[prompt.name][1] == pytest.approx(delivering * efficient_prefill_ms)
+            assert policy.first_outputs[prompt.name] == pytest.approx(
+                (32769, 32769 * efficient_prefill_ms / 4096))
 
 
 @pytest.mark.parametrize("count", [5, 16])
@@ -201,6 +208,20 @@ def test_short_prompt_startup_and_subsequent_decode_gaps(count, accepted):
     outputs = [row["output_tokens"] for row in result.requests]
     assert min(outputs) > 100
     assert max(outputs) - min(outputs) <= 8
+
+
+@pytest.mark.parametrize("decoders", [4, 15])
+@pytest.mark.parametrize("accepted", [0, 3, 7])
+def test_a_prompt_arriving_among_long_decoders_reaches_its_first_output_promptly(decoders, accepted):
+    acceptance = tuple(float(j < accepted) for j in range(7))
+    requests = [Request(f"d{i:02}", 0, 100_000, acceptance=acceptance, max_new_tokens=100_000)
+                for i in range(decoders)]
+    requests.append(Request("prompt", 400, 16, arrival_ms=1000, acceptance=acceptance))
+    policy = UtilityScheduler(Value(64), UtilityConfig(16, 4, 100, 0.1, "service"))
+    result = run(requests, catalog(), Value(64), scheduler=policy, horizon_ms=4000)
+    prompt = next(row for row in result.requests if row["name"] == "prompt")
+    assert prompt["ttft_ms"] is not None and prompt["ttft_ms"] < 300
+    assert result.summary["max_output_gap_ms"] < 150
 
 
 def test_prerequisite_is_valued_with_the_shared_following_batch():

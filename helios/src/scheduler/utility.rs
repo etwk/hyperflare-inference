@@ -83,11 +83,24 @@ pub(super) struct LaneValue {
     pub age_price: f64,
     pub age_ms: f64,
     pub reference_delivery_ms: f64,
+    /// Prompt tokens left before the first output, plus that output; zero once decoding.
+    pub delivery_tokens: f64,
+    /// Time those tokens take at the request's feasible token rate.
+    pub delivery_ms: f64,
 }
 
 impl LaneValue {
+    /// A prompt chunk earns its tokens and the share of the first output's delivery and
+    /// age value that it completes, valued at the age the output will have when it arrives.
     pub fn prefill(&self, consumed: usize, first_output: bool) -> f64 {
-        self.prefill_token * consumed as f64 + self.output_token * f64::from(first_output)
+        let tokens = consumed as f64 + f64::from(first_output);
+        let mut value = self.prefill_token * consumed as f64 + self.output_token * f64::from(first_output);
+        if self.delivery_tokens > 0.0 {
+            value += tokens / self.delivery_tokens
+                * (self.delivery
+                    + self.age_price * self.reference_delivery_ms * (self.age_ms + self.delivery_ms));
+        }
+        value
     }
 
     pub fn decode(&self, expected_output: f64, duration_ms: f64) -> f64 {

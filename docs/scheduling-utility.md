@@ -25,18 +25,23 @@ allocation results below assume a frozen set of backlogged requests.
 ## Progress and delivery are different services
 
 Let `x_i` be request `i`'s useful-token rate, counting consumed prompt tokens and
-emitted output tokens. Let `z_i` be its output-delivery rate while decoding.
+emitted output tokens. Let `z_i` be its output-delivery rate.
 A burst of eight accepted tokens earns eight output units and one delivery.
-Rejected drafts, padding, and inactive rows earn neither service. An unfinished
-prefill chunk earns prompt progress and no delivery.
+Rejected drafts, padding, and inactive rows earn neither service. A prompt's
+first output is its first delivery. A prefill chunk earns prompt progress and
+the share of that delivery it completes, as defined in
+[Pricing the delay caused by a graph](#pricing-the-delay-caused-by-a-graph).
 
 The stationary rate utility is
 
 ```text
 F = intrinsic useful work per millisecond
     + sum_i f_i log(x_i / m_i)
-    + sum_{i in decode} g_i log(z_i / d_i).
+    + sum_{i in delivery} g_i log(z_i / d_i),
 ```
+
+where `delivery` contains decoding requests and requests awaiting their first
+output.
 
 Intrinsic work is `sum_i w_i(P_i + beta D_i)`. The constants `m_i` and `d_i`
 are maximum individually feasible token and delivery rates from the catalog.
@@ -90,10 +95,12 @@ service rate and its marginal price. This includes the prefill-to-decode
 transition, changes in speculative acceptance, and timing updates. Changing a
 normalization constant inside a logarithm must not itself reprice a token.
 
-The first visible output initializes delivery history to one delivery over its
-measured execution interval. A request already decoding without an observed
-delivery starts from the batch-feasible delivery reference defined below.
-Token and delivery histories then persist until the request departs.
+A request with a feasible delivery rate, including a prompt awaiting its first
+output, starts its delivery history from the batch-feasible delivery reference
+defined below. When no delivery rate is known before the first visible output,
+that output initializes delivery history to one delivery over its measured
+execution interval. Token and delivery histories then persist until the request
+departs.
 
 The implementation stores logarithms of rate fractions. An unserved interval
 decreases log rate by `T/tau`, so long stalls remain representable. All candidate
@@ -189,7 +196,8 @@ c_i * (A_i*T + T*T/2).
 ```
 
 Selected and excluded streams both wait through the graph. A selected stream's
-age resets once at completion. Prefill has no decode-age clock.
+age resets once at completion. A prompt's age runs from arrival; prefill chunks
+before its first output do not reset it.
 
 Consider a reference that independently chooses an action each round from a
 fixed distribution. Let `p_i` be its probability of serving stream `i`, and
@@ -223,16 +231,30 @@ family of `k` streams, uniformly sampled cohorts of `b=min(capacity,k)` give
 `sigma_i = K*T_family/b`, where `K` counts all delivery-bearing streams.
 The action probabilities are the wall-time fractions divided by their durations,
 then normalized. This defines a realizable independent reference on frozen
-ready families. Prefilling requests do not acquire a delivery clock or enlarge
-`K`; their token service retains its own fairness price. Streams blocked by
-additional prerequisite stages use an individual future-delivery reference.
-That multistage extension is a scheduling approximation.
+ready families. Streams blocked by additional prerequisite stages use an
+individual future-delivery reference. That multistage extension is a scheduling
+approximation.
+
+A request awaiting its first output is delivery-bearing and counts in `K`. Its
+delivery rate is the launch rate of its most token-efficient prefill or mixed
+graph, of duration `T_i`, so its reference is `sigma_i = K*T_i`. With `n` prompt
+tokens left, the first output follows `n+1` tokens of service, which take
+`R_i = (n+1)/x_i` at the feasible token rate `x_i`. A chunk consuming `u` of
+those prompt tokens, plus the output when it finishes the prompt, completes the
+share `s_i = (u+first)/(n+1)` of that delivery. It earns `s_i` times the
+delivery price and `s_i*c_i*sigma_i*(A_i+R_i)`, the continuation valued at the
+age the first output will have when it arrives. The prompt's clock resets only
+at that output, whose continuation prices its waiting, so prompts are absent
+from the excluded-stream waiting cost. Pricing a delivery that takes several
+graphs as proportional shares is a scheduling approximation; the identity above
+covers streams that one graph can serve.
 
 Using `h` for one-step policy improvement gives
 
 ```text
 score(a) = [expected priced token and delivery service
-            + sum_{served decode i} c_i*sigma_i*(A_i+T)] / T
+            + sum_{served decode i} c_i*sigma_i*(A_i+T)
+            + sum_{prompt chunks i} s_i*c_i*sigma_i*(A_i+R_i)] / T
            - T/2 * sum_{active decode i} c_i.
 ```
 
@@ -248,10 +270,11 @@ change the reference; there is no global optimality claim for those transitions.
 Variable-duration reward and continuation comparisons are instances of the
 [renewal optimization framework](https://ee.usc.edu/stochastic-nets/docs/renewal-optimization.pdf).
 
-With no active decoder, the age terms vanish. Full prefills compete by useful
-value per time. With active decoders, a smaller prefill can win when the loss in
-prompt throughput is smaller than the reduction in priced waiting. No duration
-filter or preferred chunk size is involved.
+With no active decoder, the waiting cost vanishes and a prompt's delivery and
+continuation value is proportional to the tokens a chunk consumes. Full prefills
+compete by useful value per time. With active decoders, a smaller prefill can
+win when the loss in prompt throughput is smaller than the reduction in priced
+waiting. No duration filter or preferred chunk size is involved.
 
 For a fixed physical graph, the excluded-stream cost depends on its duration,
 not cohort membership. Its best cohort therefore contains the largest additive
@@ -287,9 +310,10 @@ measured estimate still supplies them after it becomes stale. Rates include
 logical prompt lengths, remaining output budgets,
 conditional speculative acceptance, and physical graph padding. An unknown
 normalizer leaves that price coordinate uninitialized; it does not invent a
-duration. Token prices persist across the prefill/decode transition. The first
-published burst initializes a missing delivery history from its measured frame;
-an already decoding request without that observation uses the feasible reference.
+duration. Token prices persist across the prefill/decode transition. A request
+with a feasible delivery rate, including a prompt awaiting its first output,
+starts its delivery history from the feasible reference. The first published
+burst initializes a delivery history still missing then from its measured frame.
 
 `RequestScheduler::complete` validates all records before learning graph cost or
 updating service prices. It uses the change from committed request counters
@@ -320,10 +344,26 @@ timestamp independently of GPU service time.
 
 ## Limitations and evaluation
 
-The stationary derivation determines neither fairness weight. Token fairness
-sets a startup/throughput preference: a smaller coefficient lets efficient
-decode batches delay other requests' first output longer. The policy provides no
-output-gap bound, and adding mixed graphs to a catalog does not create one.
+The stationary derivation determines neither fairness weight nor the age price.
+Together they set the startup/throughput preference: smaller coefficients let
+efficient decode batches delay other requests' first output longer. The policy
+provides no output-gap bound, and adding mixed graphs to a catalog does not
+create one.
+
+Running a prompt chunk at the feasible token rate leaves `A_i+R_i` nearly
+unchanged and raises the share of the first output that each remaining prompt
+token carries. Among prompts waiting together, the one closest to its first
+output therefore gains priority, and their first outputs are staggered instead
+of arriving together after interleaved chunks bring every prompt to its end.
+Once a long prompt outranks decode, it likewise tends to run its remaining
+chunks consecutively while decoders wait, and the resulting decoder output gap
+grows with prompt length.
+
+The share counts prompt tokens, which matches the share of remaining time only
+when the prompt's chunks run at its feasible token rate. A chunk shortened by a
+checkpoint cut near the start of a prompt, such as one token before a message
+boundary, takes a whole graph for a small share of the first output's value and
+can wait behind decode for seconds.
 
 The dispatcher has the immediate-value baseline's finite-tail limitation: a
 129-token prompt may use 128 plus 1 tokens when a padded 256-token graph would
@@ -365,6 +405,11 @@ the simulator checks for this policy:
   `tau=100 ms`, service-weighted history, and age price 0.1. Every first output
   must arrive within 100 ms, every later gap must stay below 150 ms, and output
   counts must differ by at most eight tokens.
+- `test_a_prompt_arriving_among_long_decoders_reaches_its_first_output_promptly`
+  admits a 400-token prompt at 1000 ms among four or fifteen continuously
+  decoding requests with zero, three, or seven accepted drafts, using the same
+  preferences. Its first output must arrive within 300 ms of arrival, and no
+  output gap may reach 150 ms.
 - `test_common_workloads_complete_or_make_progress_to_the_horizon` runs every
   workload in `scripts/scheduling_sim/workloads.py` with each rate history,
   with and without the synthetic mixed catalog. Every request must make

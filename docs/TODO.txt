@@ -113,6 +113,31 @@
     latency measurements; measure GPU replay, queueing, and host planning separately.
     See scheduling-runtime-design.md#funded-timing-refresh.
 
+[ ] Qualify first-output pricing (scheduling-utility.md#pricing-the-delay-caused-by-a-graph)
+    in GB300 serving: DeepSeek V4.1 Flash with seven MTP drafts, balanced
+    policy, uncached Spec-Bench prompts, closed loop at 1 to 32 streams, with
+    and without long prompts. Record TTFT p50/p99, inter-token time, and
+    throughput against the engine without it; only CPU scheduler models have
+    measured it.
+
+[ ] Bound the decoder output gap while a long prompt finishes. A prompt that
+    outranks decode tends to run its remaining chunks back to back
+    (scheduling-utility.md#limitations-and-evaluation). In a CPU closed loop
+    over GB300 DeepSeek V4.1 Flash graph durations with one prompt in four of
+    8,192 to 32,768 tokens, decoder gap p99.9 is 320 to 423 ms at 4 to 32
+    streams, against 127 to 138 ms when prompts compete only through token
+    fairness. Close when that gap stays near one prefill graph's duration
+    without giving back the first-output latency gain.
+
+[ ] Value a prompt chunk shortened by a checkpoint cut by the share of the
+    remaining time to the first output that it removes, not by its share of
+    prompt tokens (scheduling-utility.md#limitations-and-evaluation). In a CPU
+    closed loop over GB300 DeepSeek V4.1 Flash graph durations with sixteen
+    streams of 200- to 600-token prompts, the 0.5% whose first chunk stops at
+    a message boundary after token 1 reach their first output after a median
+    of 2.3 s, against 335 ms for the rest. Close when such prompts reach their
+    first output within the p99 of the others.
+
 [ ] Extend the two-frame submission window to nonterminal prefill with
     device-owned continuation positions and fenced cache reservations.
 
