@@ -545,7 +545,7 @@ fn indeterminate_execution_occupies_the_submission_window_until_completion() {
 }
 
 #[test]
-fn stale_graph_cost_retains_its_last_valid_observation_and_resets_the_median() {
+fn stale_graph_cost_retains_its_last_valid_observation_and_its_window() {
     let mut s = cold_engine(1, false);
     add(&mut s, 1, 1, 64);
     let plan = s.plan().unwrap();
@@ -637,7 +637,8 @@ fn stale_graph_cost_retains_its_last_valid_observation_and_resets_the_median() {
             ..Default::default()
         },
     );
-    assert_eq!(s.estimated_duration_ns(&plan), Some(8 * MS));
+    // The stale entry keeps its window: the median of 2 ms and 8 ms.
+    assert_eq!(s.estimated_duration_ns(&plan), Some(5 * MS));
     s.observe_execution(
         &plan,
         ExecutionTiming {
@@ -662,7 +663,7 @@ fn stale_graph_cost_retains_its_last_valid_observation_and_resets_the_median() {
             ..Default::default()
         },
     );
-    assert_eq!(s.estimated_duration_ns(&plan), Some(12 * MS));
+    assert_eq!(s.estimated_duration_ns(&plan), Some(8 * MS));
 }
 
 #[test]
@@ -2075,7 +2076,8 @@ fn mixed_cost_observations_and_expiry_are_specific_to_both_token_capacities() {
     s.advance_to(s.policy.estimate_ttl_ns + 10 * MS).unwrap();
     assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(6 * MS));
     s.observe_execution(&make(8, 64), gpu_time(MS));
-    assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(MS));
+    // The stale entry keeps its window: the median of 2 ms, 10 ms and 1 ms.
+    assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(2 * MS));
 }
 
 #[test]

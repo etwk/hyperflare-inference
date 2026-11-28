@@ -78,10 +78,11 @@ struct ReplayTimes {
 }
 
 impl ReplayTimes {
-    fn observe(&mut self, sample: u64, fresh: bool) -> u64 {
-        if !fresh {
-            *self = Self::default();
-        }
+    /// Adds one replay and returns the median of the last nine. A stale entry keeps its
+    /// window: staleness says the estimate is old, not that the cost changed, and a new window
+    /// would make whichever replay comes first after idle the estimate, however far it is from
+    /// the steady cost.
+    fn observe(&mut self, sample: u64) -> u64 {
         self.samples[self.next] = sample;
         self.next = (self.next + 1) % self.samples.len();
         self.len = (self.len + 1).min(self.samples.len());
@@ -145,7 +146,8 @@ impl ActionCosts {
         };
         let estimate = &mut self.entries[self.index[&key]].1;
         estimate.nanos = nanos;
-        estimate.replays.observe(nanos, false);
+        estimate.replays = ReplayTimes::default();
+        estimate.replays.observe(nanos);
         estimate.observed_at_ns = self.now_ns;
         self.refresh_packed_durations();
     }
@@ -311,8 +313,7 @@ impl ActionCosts {
         };
         if let Some(&index) = self.index.get(&key) {
             let estimate = &mut self.entries[index].1;
-            let fresh = estimate.fresh(self.now_ns, self.ttl_ns);
-            estimate.nanos = estimate.replays.observe(sample, fresh);
+            estimate.nanos = estimate.replays.observe(sample);
             estimate.observed_at_ns = self.now_ns;
             self.refresh_packed_durations();
         }
@@ -328,33 +329,80 @@ mod tests {
     fn isolated_slow_replay_does_not_displace_the_steady_cost() {
         let mut replays = ReplayTimes::default();
         for _ in 0..9 {
-            assert_eq!(replays.observe(8_000_000, true), 8_000_000);
+            assert_eq!(replays.observe(8_000_000), 8_000_000);
         }
-        assert_eq!(replays.observe(16_000_000, true), 8_000_000);
+        assert_eq!(replays.observe(16_000_000), 8_000_000);
         for _ in 0..9 {
-            assert_eq!(replays.observe(8_000_000, true), 8_000_000);
+            assert_eq!(replays.observe(8_000_000), 8_000_000);
         }
     }
 
     #[test]
-    fn sustained_cost_changes_replace_the_window_and_staleness_resets_it() {
+    fn sustained_cost_changes_replace_the_window() {
         let mut replays = ReplayTimes::default();
         for _ in 0..9 {
-            replays.observe(8, true);
+            replays.observe(8);
         }
         for _ in 0..4 {
-            assert_eq!(replays.observe(16, true), 8);
+            assert_eq!(replays.observe(16), 8);
         }
-        assert_eq!(replays.observe(16, true), 16);
-        assert_eq!(replays.observe(32, false), 32);
-        assert_eq!(replays.observe(16, true), 24);
+        assert_eq!(replays.observe(16), 16);
+    }
+
+    /// After the estimate TTL, one slow replay leaves the measured cost in place, and the
+    /// entry is fresh again.
+    #[test]
+    fn a_slow_replay_after_idle_does_not_displace_the_steady_cost() {
+        let graph = GraphDescriptor {
+            name: "prefill-128".into(),
+            kind: GraphKind::Prefill,
+            sampling_mode: SamplingMode::General,
+            confidence_width: 0,
+            draft_tokens: 0,
+            handle: 1,
+            batch_capacity: 1,
+            token_capacity: 128,
+            packed_token_capacity: 0,
+            prefill_capacity: 0,
+            estimated_duration_ns: 0,
+            input_bindings: vec![],
+            tuned_bindings: vec![],
+        };
+        let step = ScheduledStep {
+            draft_tokens: 0,
+            kind: GraphKind::Prefill,
+            batch_capacity: 1,
+            token_capacity: 128,
+            packed_token_capacity: 0,
+            mixed: None,
+            lanes: vec![],
+            requires_feedback: false,
+        };
+        let timing = |nanos| {
+            let mut gpu_ns = [None; 16];
+            gpu_ns[0] = Some(nanos);
+            crate::execution::ExecutionTiming { gpu_ns, readiness: None, wall_ns: 0, queued: false }
+        };
+        let ttl = 30_000_000_000;
+        let mut costs = ActionCosts::prepared(&[graph], 128).unwrap();
+        for _ in 0..9 {
+            costs.observe(&step, timing(11_000_000));
+        }
+        let key = super::Key::from_step(&step);
+        costs.advance_to(ttl, ttl);
+        assert!(!costs.is_fresh(key));
+        costs.observe(&step, timing(41_000_000));
+        assert_eq!(costs.get(&step), Some(11_000_000));
+        assert!(costs.is_fresh(key));
+        costs.observe(&step, timing(11_000_000));
+        assert_eq!(costs.get(&step), Some(11_000_000));
     }
 
     #[test]
     fn even_sample_median_does_not_overflow() {
         let mut replays = ReplayTimes::default();
-        assert_eq!(replays.observe(u64::MAX, true), u64::MAX);
-        assert_eq!(replays.observe(u64::MAX - 1, true), u64::MAX);
+        assert_eq!(replays.observe(u64::MAX), u64::MAX);
+        assert_eq!(replays.observe(u64::MAX - 1), u64::MAX);
     }
 
     #[test]
