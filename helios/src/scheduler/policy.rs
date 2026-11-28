@@ -361,17 +361,14 @@ impl RequestScheduler {
         catalog: &[usize],
         cut: Option<usize>,
     ) -> Option<usize> {
-        let terminal_only = self.prefill_requires_terminal_completion(request, cut);
+        let stop = self.terminal_completion_stop(request, cut);
         let mut best: Option<(usize, usize)> = None;
         for &capacity in catalog {
             let work = self.prefill_work_through(request, capacity, cut);
-            if work == 0 {
+            if work == 0 || stop.is_some_and(|stop| request.consumed_tokens as usize + work < stop) {
                 continue;
             }
             let resolved = self.resolve_prefill_kind(request, capacity, work, cut);
-            if terminal_only && resolved == GraphKind::Prefill {
-                continue;
-            }
             if self.costs.duration(resolved, 1, capacity).is_none() {
                 continue;
             }
@@ -507,17 +504,14 @@ impl RequestScheduler {
         if r.consumed_tokens < r.prompt_tokens as u64 {
             let catalog = self.prefill_catalog(r.prefill_kind());
             let cut = self.estimated_checkpoint_cut(r);
-            let terminal_only = self.prefill_requires_terminal_completion(r, cut);
+            let stop = self.terminal_completion_stop(r, cut);
             let mut natural_fit = None;
             for &capacity in catalog {
                 let work = self.prefill_work_through(r, capacity, cut);
-                if work == 0 {
+                if work == 0 || stop.is_some_and(|stop| r.consumed_tokens as usize + work < stop) {
                     continue;
                 }
                 let kind = self.resolve_prefill_kind(r, capacity, work, cut);
-                if terminal_only && kind == GraphKind::Prefill {
-                    continue;
-                }
                 if let Some(ns) = self.costs.duration(kind, 1, capacity) {
                     if ns == 0
                         && *natural_fit
@@ -779,8 +773,9 @@ impl RequestScheduler {
                             && ((matches!(following, GraphKind::Prefill | GraphKind::TerminalPrefill)
                                 && (self.resolve_prefill_kind(request, extent, work, cut)
                                     != following
-                                    || (following == GraphKind::Prefill
-                                        && self.prefill_requires_terminal_completion(request, cut))))
+                                    || self.terminal_completion_stop(request, cut).is_some_and(|stop| {
+                                        request.consumed_tokens as usize + work < stop
+                                    })))
                                 || (ns == 0
                                     && self.natural_fit_prefill_capacity(
                                         request,
@@ -964,8 +959,9 @@ impl RequestScheduler {
                 // larger padded shapes that consume no additional tokens are skipped.
                 if work == 0
                     || resolved != kind
-                    || (kind == GraphKind::Prefill
-                        && self.prefill_requires_terminal_completion(r, cut))
+                    || self
+                        .terminal_completion_stop(r, cut)
+                        .is_some_and(|stop| r.consumed_tokens as usize + work < stop)
                     || (duration_ns == 0
                         && self.natural_fit_prefill_capacity(r, catalog, cut) != Some(capacity))
                 {

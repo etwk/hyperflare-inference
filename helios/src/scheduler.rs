@@ -878,10 +878,7 @@ impl RequestScheduler {
         if self.terminal_prefill_catalog.binary_search(&capacity).is_err() {
             return GraphKind::Prefill;
         }
-        let next_stop = cut
-            .unwrap_or(request.prompt_tokens)
-            .min(request.prefill_limit())
-            .min(request.prompt_tokens);
+        let next_stop = Self::next_prefill_stop(request, cut);
         let end = (request.consumed_tokens as usize).saturating_add(work);
         let window = self.terminal_prefill_window();
         if end >= next_stop || (window > 0 && next_stop.saturating_sub(end) <= window) {
@@ -891,34 +888,37 @@ impl RequestScheduler {
         }
     }
 
-    pub(super) fn prefill_requires_terminal_completion(
-        &self,
-        request: &LiveRequest,
-        cut: Option<usize>,
-    ) -> bool {
-        if request.prompt_logprobs || self.terminal_prefill_catalog.is_empty() {
-            return false;
-        }
-        let next_stop = cut
-            .unwrap_or(request.prompt_tokens)
+    /// The next position a prefill chunk must stop at: the prompt's end, the checkpoint cut, or
+    /// a conditioned-window boundary, whichever comes first.
+    fn next_prefill_stop(request: &LiveRequest, cut: Option<usize>) -> usize {
+        cut.unwrap_or(request.prompt_tokens)
             .min(request.prefill_limit())
-            .min(request.prompt_tokens);
+            .min(request.prompt_tokens)
+    }
+
+    /// The stop that `request`'s next prefill chunk must reach, when one terminal chunk can: a
+    /// chunk of the largest capacity reaches it and the smallest capacity holding the rest has a
+    /// terminal graph. A shorter chunk would need another one after it before the stop: one
+    /// ending before the tail-protection window must not leave tokens inside it, and one ending
+    /// inside it leaves tokens that cost a further step.
+    pub(super) fn terminal_completion_stop(&self, request: &LiveRequest, cut: Option<usize>) -> Option<usize> {
+        if request.prompt_logprobs || self.terminal_prefill_catalog.is_empty() {
+            return None;
+        }
+        let next_stop = Self::next_prefill_stop(request, cut);
         let remaining = next_stop.saturating_sub(request.consumed_tokens as usize);
         if remaining == 0 {
-            return false;
+            return None;
         }
-        let Some(&max_capacity) = self.prefill_catalog.last() else {
-            return false;
-        };
+        let &max_capacity = self.prefill_catalog.last()?;
         if self.prefill_work_through(request, max_capacity, cut) < remaining {
-            return false;
+            return None;
         }
-        let Some(&smallest_fit) = self.prefill_catalog.iter().find(|&&cap| cap >= remaining) else {
-            return false;
-        };
+        let &smallest_fit = self.prefill_catalog.iter().find(|&&cap| cap >= remaining)?;
         self.terminal_prefill_catalog
             .binary_search(&smallest_fit)
             .is_ok()
+            .then_some(next_stop)
     }
 
     pub fn snapshot_slot(&self, snapshot: SnapshotId) -> StateSlotId {

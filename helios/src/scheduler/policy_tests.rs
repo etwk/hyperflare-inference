@@ -4502,6 +4502,68 @@ fn terminal_prefill_selects_last_chunk_and_protects_small_tail_window() {
     );
 }
 
+/// Terminal graphs that cost nearly the same at every capacity, as on DeepSeek V4.1's GB300
+/// core: 256 is cheaper per token than 512 for fewer than 282 tokens, but runs 1 ms short of it.
+fn engine_with_flat_terminal_prefill() -> RequestScheduler {
+    let mut s = engine_with_terminal_prefill(&[256, 512]);
+    without_optional_captures(&mut s);
+    set_cost(&mut s, GraphKind::TerminalPrefill, 1, 256, 10 * MS);
+    set_cost(&mut s, GraphKind::TerminalPrefill, 1, 512, 11 * MS);
+    s
+}
+
+/// A request whose last message boundary, its checkpoint anchor, is 30 tokens before its end. A
+/// chunk that stops at the anchor earns no output token, so only its cost decides the chunk.
+fn admit_with_anchor(s: &mut RequestScheduler, anchor: usize) -> RequestHandle {
+    s.admit(RequestSpec {
+        prompt: (0..anchor as u32 + 30).collect(),
+        message_boundaries: vec![anchor],
+        conditioning: vec![],
+        max_new_tokens: 4,
+        grammar_constrained: false,
+        host_stops: false,
+        prompt_logprobs: false,
+        growable_output: false,
+    })
+    .unwrap()
+}
+
+/// When one terminal chunk can reach the stop, it runs, even where a smaller terminal chunk is
+/// cheaper per token: that one would end inside the tail-protection window and leave another
+/// step before the stop.
+#[test]
+fn a_terminal_chunk_that_can_reach_the_stop_does() {
+    let mut s = engine_with_flat_terminal_prefill();
+    let handle = admit_with_anchor(&mut s, 270);
+    let steps = run_prefill_sequence(&mut s, handle);
+    assert_eq!(steps.first(), Some(&(GraphKind::TerminalPrefill, 512, 270)), "{steps:?}");
+}
+
+/// Checkpoint pricing walks the chunks dispatch runs: for every anchor position, the walk's
+/// estimate of the prefill up to the anchor equals the measured cost of the chunks the
+/// scheduler dispatches to reach it.
+#[test]
+fn checkpoint_pricing_walks_the_chunks_dispatch_runs() {
+    for anchor in (130..=1100).step_by(7) {
+        let mut s = engine_with_flat_terminal_prefill();
+        let handle = admit_with_anchor(&mut s, anchor);
+        let request = s.request(handle).unwrap();
+        let catalog = s.prefill_catalog_costs(request);
+        let priced = RequestScheduler::interval_prefill_ns(request, &catalog, s.terminal_prefill_window(), 0, anchor);
+        let steps = run_prefill_sequence(&mut s, handle);
+        let (mut reached, mut ran) = (0, 0);
+        for &(kind, capacity, tokens) in &steps {
+            if reached >= anchor {
+                break;
+            }
+            reached += tokens;
+            ran += s.costs.duration(kind, 1, capacity).unwrap();
+        }
+        assert_eq!(reached, anchor, "{steps:?}");
+        assert_eq!(priced, Some(ran), "anchor {anchor} ran {steps:?}");
+    }
+}
+
 #[test]
 fn terminal_prefill_runs_at_checkpoint_boundary_cut() {
     let mut s = engine_with_terminal_prefill(&[256, 512]);

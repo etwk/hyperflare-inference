@@ -287,7 +287,12 @@ largest ordinary `PREFILL` capacity absent from the terminal catalog. For
 capacities present in the terminal catalog, Helios schedules `TERMINAL_PREFILL`
 at prompt completion, checkpoint cuts, conditioned-window boundaries, and any
 penultimate chunk leaving at most the tail-protection window, while earlier
-chunks run `PREFILL`. Committing a non-terminal `PREFILL` chunk at a capacity
+chunks run `PREFILL`. When one chunk of the largest capacity can reach the next
+of these stops and the smallest capacity holding the rest has a terminal graph,
+only a chunk that reaches the stop is a candidate. A shorter terminal chunk
+ending inside the window would leave tokens that cost another step, and when
+terminal graphs cost nearly the same at every capacity, the one chunk that
+reaches the stop is cheaper. Committing a non-terminal `PREFILL` chunk at a capacity
 present in the terminal catalog marks the request as holding deferred
 continuation state until a `TERMINAL_PREFILL` chunk completes. While deferred
 state is active, the scheduler excludes the request from `MIXED` graphs and
@@ -296,7 +301,8 @@ continuation state is never published. Checkpoint cut budgeting prices
 non-terminal and terminal chunks using their separate measured durations with
 sibling fallback when only one operation is measured, skipping unmeasured
 larger capacities that consume no additional tokens and unmeasured non-target
-capacities on terminal-prefill catalogs.
+capacities on terminal-prefill catalogs, and it applies the same rule for a chunk
+that can reach its stop, so a cut is priced at the chunks dispatch will run.
 
 With no active decoder, the age term vanishes. Fully occupied large prefill
 graphs win when their useful value rate is highest. With decoding streams, a
