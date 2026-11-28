@@ -582,6 +582,37 @@ impl ModelRuntime {
                         error: Some(error),
                     };
                 }
+                // The host prefix store opens its transfer threads on every
+                // rank's context, which the loader prepared for this process.
+                // It opens before the executor starts GPU work: releasing
+                // registered host memory while the persistent worker runs
+                // blocks in the driver, so a failed open must unwind first.
+                let store = match manifest
+                    .offload
+                    .as_ref()
+                    .and_then(|binding| binding.take())
+                    .map(|(prepared, gpu_cubins)| {
+                        if let Some(rank) = prepared.geometry.first() {
+                            worker_metrics.codec_placement(rank.placement);
+                        }
+                        if let Some(warning) =
+                            prepared.intake_warning(worker_config.limits.max_active)
+                        {
+                            if log_to_stderr { eprintln!("warning: {warning}"); }
+                        }
+                        crate::offload::open(prepared, gpu_cubins)
+                    })
+                    .transpose()
+                {
+                    Ok(store) => store,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error.clone()));
+                        return Shutdown {
+                            drained: true,
+                            error: Some(error),
+                        };
+                    }
+                };
                 // SAFETY: start's caller retains all prepared resources through
                 // confirmed drain. This thread exclusively owns the executor;
                 // construction binds both streams to the manifest's context.
@@ -589,10 +620,12 @@ impl ModelRuntime {
                     Ok(executor) => executor,
                     Err(error) => {
                         let _ = ready_tx.send(Err(error.clone()));
-                        return Shutdown {
+                        let mut shutdown = Shutdown {
                             drained: true,
                             error: Some(error),
                         };
+                        close_host_store(store, &mut shutdown);
+                        return shutdown;
                     }
                 };
                 let mut scheduler = match crate::model::scheduler_capabilities_with_manifest(
@@ -605,6 +638,7 @@ impl ModelRuntime {
                         let _ = ready_tx.send(Err(error.clone()));
                         let mut shutdown = executor.close();
                         shutdown.error = Some(error);
+                        close_host_store(store, &mut shutdown);
                         return shutdown;
                     }
                 };
@@ -680,36 +714,9 @@ impl ModelRuntime {
                     let _ = ready_tx.send(Err(error.clone()));
                     let mut shutdown = executor.close();
                     shutdown.error = Some(error);
+                    close_host_store(store, &mut shutdown);
                     return shutdown;
                 }
-                // The host prefix store opens its transfer threads on every
-                // rank's context, which the loader prepared for this process.
-                let store = match executor
-                    .manifest()
-                    .offload
-                    .as_ref()
-                    .and_then(|binding| binding.take())
-                    .map(|(prepared, gpu_cubins)| {
-                        if let Some(rank) = prepared.geometry.first() {
-                            worker_metrics.codec_placement(rank.placement);
-                        }
-                        if let Some(warning) =
-                            prepared.intake_warning(worker_config.limits.max_active)
-                        {
-                            if log_to_stderr { eprintln!("warning: {warning}"); }
-                        }
-                        crate::offload::open(prepared, gpu_cubins)
-                    })
-                    .transpose()
-                {
-                    Ok(store) => store,
-                    Err(error) => {
-                        let _ = ready_tx.send(Err(error.clone()));
-                        let mut shutdown = executor.close();
-                        shutdown.error = Some(error);
-                        return shutdown;
-                    }
-                };
                 let mut worker = Worker::new(
                     &worker_config,
                     &frontend,
@@ -1245,25 +1252,7 @@ impl<'a> Worker<'a> {
     }
 
     fn close_store(&mut self, shutdown: &mut Shutdown) {
-        let Some(store) = self.store.take() else {
-            return;
-        };
-        // Retain registered slabs if either drain fails, including an unwind
-        // inside the store's close operation.
-        let mut store = std::mem::ManuallyDrop::new(store);
-        if !shutdown.drained {
-            return;
-        }
-        shutdown.drained = false;
-        match store.close() {
-            Ok(()) => {
-                shutdown.drained = true;
-                drop(std::mem::ManuallyDrop::into_inner(store));
-            }
-            Err(error) => {
-                shutdown.error.get_or_insert(error.into());
-            }
-        }
+        close_host_store(self.store.take(), shutdown);
     }
 
     fn complete_image_preparation(&mut self) -> Result<bool> {
@@ -2665,6 +2654,29 @@ impl<'a> Worker<'a> {
             for request in group {
                 request.fail(error.clone());
             }
+        }
+    }
+}
+
+/// Closes the host prefix store once the executor has stopped. Registered slabs are
+/// retained if the executor did not drain or the store's own close fails, including
+/// an unwind inside it.
+fn close_host_store(store: Option<Box<dyn flare_selene::HostStore>>, shutdown: &mut Shutdown) {
+    let Some(store) = store else {
+        return;
+    };
+    let mut store = std::mem::ManuallyDrop::new(store);
+    if !shutdown.drained {
+        return;
+    }
+    shutdown.drained = false;
+    match store.close() {
+        Ok(()) => {
+            shutdown.drained = true;
+            drop(std::mem::ManuallyDrop::into_inner(store));
+        }
+        Err(error) => {
+            shutdown.error.get_or_insert(error.into());
         }
     }
 }
