@@ -91,9 +91,18 @@ fn spec(system: Option<usize>, prompt: usize, output: u32) -> RequestSpec {
     }
 }
 fn run_step(s: &mut RequestScheduler) -> ScheduledPlan {
+    let (step, fence) = submit_step(s);
+    complete_step(s, &step, fence);
+    step
+}
+/// Plans and commits a step, leaving it in flight.
+fn submit_step(s: &mut RequestScheduler) -> (ScheduledPlan, Fence) {
     let step = s.plan().unwrap();
     let fence = Fence(s.submitted.0 + 1);
     s.commit(&step, fence).unwrap();
+    (step, fence)
+}
+fn complete_step(s: &mut RequestScheduler, step: &ScheduledPlan, fence: Fence) {
     let mut records = vec![CompletionRecord::default(); s.limits.request_capacity()];
     for lane in &step.lanes {
         let r = s.request(lane.request).unwrap();
@@ -141,7 +150,6 @@ fn run_step(s: &mut RequestScheduler) -> ScheduledPlan {
         records[lane.request.slot as usize] = record;
     }
     s.complete(fence, &records, Default::default()).unwrap();
-    step
 }
 fn stop_at_capture(s: &mut RequestScheduler, handle: RequestHandle, endpoint: u64) {
     for _ in 0..200 {
@@ -1008,5 +1016,72 @@ fn exhausted_storage_keeps_the_nearest_message_supplementaries() {
         assert_eq!(s.cache.lookup(&history(896)).unwrap().consumed_tokens, 896);
         assert_eq!(s.stats().snapshot_evictions, 0);
         assert_eq!(s.stats().message_checkpoints, snapshots as u64);
+    }
+}
+
+#[cfg(feature = "server")]
+#[test]
+fn admission_waits_only_on_a_running_prefill_sharing_a_chunk_more_than_the_cache() {
+    let mut s = scheduler_with_concurrency(16, false, 64, 2);
+    linear_checkpoint_costs(&mut s, 0.05);
+    let mut leader = spec(None, 2000, 1);
+    leader.message_boundaries = vec![1500];
+    let leader = s.admit(leader).unwrap();
+    let follower = |shared: usize| {
+        let mut follower = spec(None, 1800, 1);
+        follower.prompt[shared..].fill(1000);
+        follower.message_boundaries = vec![shared];
+        follower
+    };
+    // Shares less than one 512-token chunk: prefilling it beside the leader costs no more.
+    let short = s.plan_admission(&follower(400)).unwrap();
+    assert!(!s.awaits_shared_prefill(&short));
+    // Shares 1,500 tokens the cache does not hold: wait until the leader has prefilled and
+    // captured them.
+    let queued = s.plan_admission(&follower(1500)).unwrap();
+    let mut steps = 0;
+    let mut armed = false;
+    while {
+        let leader = s.request(leader).unwrap();
+        leader.consumed_tokens < 1500 || leader.phase == RequestPhase::Snapshot
+    } {
+        assert!(s.awaits_shared_prefill(&queued));
+        // Admission also runs while a step is in flight, including the one ending at the cut.
+        let (step, fence) = submit_step(&mut s);
+        armed |= s.request(leader).unwrap().checkpoint_capture.is_some_and(|capture| capture.endpoint == 1500);
+        assert!(s.awaits_shared_prefill(&queued), "released with step {steps} in flight");
+        complete_step(&mut s, &step, fence);
+        steps += 1;
+    }
+    assert!(steps >= 3, "the leader prefilled 1,500 tokens in {steps} steps");
+    assert!(armed, "no step in flight had the capture at 1,500 armed");
+    assert!(!s.awaits_shared_prefill(&queued));
+    // The leader's checkpoint now serves the shared part.
+    assert_eq!(s.refresh_admission_plan(&queued).unwrap().resident_tokens(), 1500);
+}
+
+#[cfg(feature = "server")]
+#[test]
+fn only_a_capture_planned_inside_the_shared_part_holds_admission() {
+    // (leader's message boundaries, scored leader, extra work fraction, follower waits): the
+    // anchor at 1,500 is inside the 1,800 shared tokens; without boundaries or optional captures
+    // the leader captures only at its prompt end; a scored prefill publishes nothing.
+    for (boundaries, scored, fraction, waits) in
+        [(vec![1500], false, 0.05, true), (vec![], false, 0.0, false), (vec![1500], true, 0.05, false)]
+    {
+        let mut s = scheduler_with_concurrency(16, false, 64, 2);
+        linear_checkpoint_costs(&mut s, fraction);
+        if scored {
+            s.scored_prefill_graphs(&[128, 256, 512]).unwrap();
+        }
+        let mut leader = spec(None, 2000, 1);
+        leader.message_boundaries = boundaries.clone();
+        leader.prompt_logprobs = scored;
+        let leader = s.admit(leader).unwrap();
+        let plan = s.plan_admission(&spec(None, 1800, 1)).unwrap();
+        assert_eq!(s.awaits_shared_prefill(&plan), waits, "{boundaries:?}, scored {scored}");
+        // A cancelled leader captures nothing.
+        s.cancel(leader).unwrap();
+        assert!(!s.awaits_shared_prefill(&plan));
     }
 }

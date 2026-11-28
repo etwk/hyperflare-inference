@@ -1556,6 +1556,39 @@ impl RequestScheduler {
         })
     }
 
+    /// Whether admitting `plan` now would prefill again what a running request is about to make
+    /// reusable: a request still consuming its prompt will capture a checkpoint inside the prefix
+    /// they share, at least one prefill chunk past what the GPU cache held when `plan` was made.
+    /// Once it has, this request restores that checkpoint, having lost nothing by waiting:
+    /// prefill graphs run one request at a time, so prefilling the same tokens beside it would
+    /// have finished no sooner.
+    #[cfg(feature = "server")]
+    pub(crate) fn awaits_shared_prefill(&self, plan: &AdmissionPlan) -> bool {
+        let gain = plan.lookup.consumed_tokens + self.limits.prefill_chunk_size as u64;
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.request.as_ref())
+            .filter(|request| {
+                !request.prompt_logprobs
+                    && matches!(
+                        request.phase,
+                        RequestPhase::Initialize
+                            | RequestPhase::Restore
+                            | RequestPhase::Vision
+                            | RequestPhase::Prefill
+                            | RequestPhase::Snapshot
+                    )
+                    && request.prompt_tokens as u64 >= gain
+            })
+            .any(|request| {
+                let shared = request
+                    .history
+                    .shared_prefix(&plan.history)
+                    .min(request.prompt_tokens as u64);
+                shared >= gain && self.plans_capture_in(request, gain as usize..=shared as usize)
+            })
+    }
+
     fn free_slot(&self) -> Result<usize> {
         self.slots
             .iter()

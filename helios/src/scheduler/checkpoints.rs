@@ -590,6 +590,25 @@ impl RequestScheduler {
         (accounting, unknown, budget)
     }
 
+    /// Whether `request` will still publish a checkpoint at a position in `range`: one it is
+    /// capturing now, one armed for the step in flight, or a selected cut it has not reached.
+    /// Arming a cut removes it from the selected cuts, so the armed capture is checked apart.
+    #[cfg(feature = "server")]
+    pub(super) fn plans_capture_in(&self, request: &LiveRequest, range: std::ops::RangeInclusive<usize>) -> bool {
+        let consumed = request.consumed_tokens as usize;
+        if request.phase == RequestPhase::Snapshot && range.contains(&consumed) {
+            return true;
+        }
+        if request.checkpoint_capture.is_some_and(|capture| range.contains(&(capture.endpoint as usize))) {
+            return true;
+        }
+        let (accounting, _, _) = self.checkpoint_selection_cached(request, false);
+        accounting
+            .cuts
+            .iter()
+            .any(|cut| consumed < cut.endpoint && range.contains(&cut.endpoint))
+    }
+
     pub(super) fn estimated_checkpoint_cut(&self, request: &LiveRequest) -> Option<usize> {
         let (accounting, _, _) = self.checkpoint_selection_cached(request, false);
         accounting

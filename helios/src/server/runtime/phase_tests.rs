@@ -257,6 +257,7 @@ impl Fixture {
                 pool_lookup_started: None,
                 host_lookup_outcome: None,
                 pool_plan: None,
+                shared_plan: None,
                 restore_wait: RestoreWait::default(),
             },
             Generation {
@@ -1468,6 +1469,49 @@ fn ignored_eos_at_the_output_limit_finishes_for_length() {
         finished,
         vec![(2, "length", crate::output::Termination::OutputLimit)]
     );
+}
+
+#[test]
+fn a_request_arriving_with_a_running_prefill_of_its_prompt_reuses_it() {
+    let fixture = Fixture::new();
+    let (sender, receiver) = mpsc::channel();
+    let prompt: Vec<u32> = (0..100).map(|n| n % 5).collect();
+    let (first, _first) = fixture.incoming(prompt.clone(), 4);
+    let (second, _second) = fixture.incoming(prompt.clone(), 4);
+    sender.send(vec![first, second]).unwrap();
+    let mut worker = fixture.worker(receiver);
+    assert!(worker.store.is_none());
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    // Both arrived together; the second waits for the first's prefill of the same 100 tokens.
+    let first = worker.active.iter().flatten().map(|active| active.request).collect::<Vec<_>>();
+    assert_eq!((first.len(), worker.pending.len()), (1, 1));
+    let first = first[0];
+    for fence in 1..=20 {
+        let (step, _) = worker.plan(0).unwrap();
+        let step = step.unwrap();
+        worker.reserve_and_pack(&step, Fence(fence)).unwrap();
+        let ends_prompt = step.kind == GraphKind::Prefill
+            && step.lanes.iter().any(|lane| lane.start_position + lane.tokens as u64 == 100);
+        let frame = completion(&worker, &step, fence, ends_prompt.then_some(1));
+        worker.complete(step.kind, frame).unwrap();
+        worker.publish().unwrap();
+        assert!(matches!(worker.admit().unwrap(), ControlFlow::Continue(_)));
+        if worker.pending.is_empty() {
+            let second = worker
+                .active
+                .iter()
+                .flatten()
+                .map(|active| active.request)
+                .find(|&handle| handle != first)
+                .unwrap();
+            let leader = worker.scheduler.request(first).unwrap();
+            assert_eq!(leader.consumed_tokens, 100, "admitted before the shared prefill finished");
+            let follower = worker.scheduler.request(second).unwrap();
+            assert_eq!((follower.phase, follower.reused_prompt_tokens()), (RequestPhase::Restore, 100));
+            return;
+        }
+    }
+    panic!("the second request was never admitted");
 }
 
 #[test]
